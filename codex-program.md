@@ -63,23 +63,23 @@ Hard constraints for this document and the experiment loop:
 - Branch: `codex-auto-research`
 - Build: `RUSTFLAGS="-C target-cpu=native" cargo build --release` succeeded
 - Regression tests: `cargo test --release --test regression -- --nocapture` passed, but several cases self-skipped because the test harness expects specific local model/reference asset filenames
-- Benchmark working baseline from `bench/run.sh --label codex-exp-prefill-prepack --runs 3`:
-  - offline: `1467ms`, `19.20x` realtime, `WER=0.0270`
-  - segmented: `1364ms`, `20.64x` realtime, `WER=0.0270`
-  - streaming: `5311ms`, `5.30x` realtime, `WER=0.0270`
-- Offline `--profile` snapshot on `bench/samples/audio.wav` after `exp-01`:
-  - total inference: `1594ms`
-  - encode: `392ms`
-  - decode: `1202ms`
+- Benchmark working baseline from `bench/run.sh --label codex-exp-encoder-stem-workspace --runs 3`:
+  - offline: `1387ms`, `20.30x` realtime, `WER=0.0270`
+  - segmented: `1343ms`, `20.96x` realtime, `WER=0.0270`
+  - streaming: `5233ms`, `5.38x` realtime, `WER=0.0270`
+- Offline `--profile` snapshot on `bench/samples/audio.wav` after `exp-02`:
+  - total inference: `1417ms`
+  - encode: `378ms`
+  - decode: `1038ms`
   - hottest counters:
-    - `sgemm`: `500.1ms`
-    - `bf16_matvec`: `426.2ms`
-    - `attention_causal`: `307.1ms`
-    - `conv2d_op`: `128.8ms`
+    - `sgemm`: `442.6ms`
+    - `bf16_matvec`: `385.5ms`
+    - `attention_causal`: `249.6ms`
+    - `conv2d_op`: `125.1ms`
 - Initial read of this baseline:
   - decode remains the larger half of end-to-end latency
-  - load-time F32 preconversion for decoder prefill reduced benchmark latency in all measured modes and shifted more multi-token projection cost out of repeated BF16 conversion
-  - the next experiment should likely target encoder conv workspace reuse or a more explicit packed-weight path beyond plain row-major F32 copies
+  - encoder stem workspace reuse improved all measured modes while shaving encoder time and reducing allocator pressure in the conv path
+  - the next experiment should likely stay in the encoder/transcription memory-reuse area or move to a more explicit packed-weight path beyond plain row-major F32 copies
 
 ### Kept Experiment Ledger
 
@@ -107,6 +107,15 @@ Template:
   - kept commit: `experiment: prepack decoder prefill weights`
   - notes: direct `--profile` dropped `bf16_matvec` from the earlier `756.1ms` snapshot to `426.2ms`; some of that work moved into `sgemm`, but the end-to-end result stayed positive in offline, segmented, and streaming modes
 
+- `exp-02`
+  - date: `2026-04-17`
+  - hypothesis: reusing encoder stem temporaries and the `conv2d` im2col workspace across calls will cut allocator churn enough to improve encoder latency
+  - touched files: `crates/qwen-asr/src/encoder.rs`, `crates/qwen-asr/src/kernels/mod.rs`
+  - benchmark delta: offline `1467ms -> 1387ms`, segmented `1364ms -> 1343ms`, streaming `5311ms -> 5233ms`, WER unchanged at `0.0270`
+  - correctness check: `RUSTFLAGS="-C target-cpu=native" cargo build --release` succeeded; `cargo test --release --test regression -- --nocapture` passed
+  - kept commit: `experiment: reuse encoder stem workspace`
+  - notes: direct `--profile` reduced encode time from `392ms` to `378ms` and nudged `conv2d_op` from `128.8ms` to `125.1ms`; the larger end-to-end gain likely comes from removing repeated stem allocations across chunk processing rather than changing convolution math itself
+
 ## Current State Map
 
 This section must keep a strict distinction between `already optimized`, `partially optimized / still leaking cost`, and `missing opportunity`.
@@ -131,6 +140,10 @@ It is the map the agent should use to choose the next experiment.
   Evidence:
   - [crates/qwen-asr/src/decoder.rs](crates/qwen-asr/src/decoder.rs) stores `wq_weight_f32_prefill`, `wk_weight_f32_prefill`, `wv_weight_f32_prefill`, `wo_weight_f32_prefill`, `gate_up_fused_f32_prefill`, and `down_weight_f32_prefill` per layer.
   - [crates/qwen-asr/src/decoder.rs](crates/qwen-asr/src/decoder.rs) uses `linear_nobias()` with those reusable F32 matrices throughout `decoder_prefill()`.
+- Encoder stem now reuses chunk buffers and the `conv2d` im2col workspace across encoder calls.
+  Evidence:
+  - [crates/qwen-asr/src/encoder.rs](crates/qwen-asr/src/encoder.rs) stores reusable `chunk_mel`, `c1`, `c2`, `c3`, `reshaped`, `pe`, and `conv_cols` inside `EncoderBuffers`.
+  - [crates/qwen-asr/src/kernels/mod.rs](crates/qwen-asr/src/kernels/mod.rs) exposes `conv2d_with_cols()` so encoder forward can avoid per-call `cols` allocation.
 
 ### Partially optimized / still leaking cost
 
@@ -139,9 +152,10 @@ It is the map the agent should use to choose the next experiment.
   - [crates/qwen-asr/src/decoder.rs](crates/qwen-asr/src/decoder.rs) allocates fresh `x_norm` and `logits` in `decoder_prefill_logits()`.
   - [crates/qwen-asr/src/decoder.rs](crates/qwen-asr/src/decoder.rs) still calls `linear_nobias_bf16_scratch()` for `lm_head` projection in `decoder_prefill_logits()`.
 - Encoder convolution uses BLAS and threaded `im2col`, but per-chunk transient buffers are still rebuilt each call.
+- Encoder stem no longer rebuilds its major conv temporaries, but encoder forward still allocates a fresh top-level `x` output buffer and re-emits per-call attention window metadata.
   Evidence:
-  - [crates/qwen-asr/src/encoder.rs](crates/qwen-asr/src/encoder.rs) allocates `chunk_mel`, `c1`, `c2`, `c3`, `reshaped`, and `pe` for each chunk.
-  - [crates/qwen-asr/src/kernels/mod.rs](crates/qwen-asr/src/kernels/mod.rs) allocates `cols` inside every `conv2d()` call.
+  - [crates/qwen-asr/src/encoder.rs](crates/qwen-asr/src/encoder.rs) still allocates `x` for each forward pass.
+  - [crates/qwen-asr/src/encoder.rs](crates/qwen-asr/src/encoder.rs) still rebuilds `chunk_sizes` and `window_starts` per call.
 - Streaming and segmented transcription reuse some state, but still copy large embedding buffers aggressively.
   Evidence:
   - [crates/qwen-asr/src/transcribe.rs](crates/qwen-asr/src/transcribe.rs) allocates `input_embeds`, `enc_output`, and `tmp_embed` on hot paths.

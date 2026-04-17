@@ -1084,6 +1084,33 @@ pub fn conv2d(out: &mut [f32], input: &[f32], weight: &[f32], bias: Option<&[f32
     let spatial_out = h_out * w_out;
 
     let mut cols = vec![0.0f32; patch_size * spatial_out];
+    conv2d_impl(out, input, weight, bias, &mut cols, c_in, c_out, h_in, w_in, kh, kw, stride, padding);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn conv2d_with_cols(out: &mut [f32], input: &[f32], weight: &[f32], bias: Option<&[f32]>,
+                        cols: &mut Vec<f32>,
+                        c_in: usize, c_out: usize, h_in: usize, w_in: usize,
+                        kh: usize, kw: usize, stride: usize, padding: usize) {
+    let h_out = (h_in + 2 * padding - kh) / stride + 1;
+    let w_out = (w_in + 2 * padding - kw) / stride + 1;
+    let patch_size = c_in * kh * kw;
+    let spatial_out = h_out * w_out;
+    cols.resize(patch_size * spatial_out, 0.0);
+    conv2d_impl(out, input, weight, bias, cols, c_in, c_out, h_in, w_in, kh, kw, stride, padding);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn conv2d_impl(out: &mut [f32], input: &[f32], weight: &[f32], bias: Option<&[f32]>,
+               cols: &mut [f32],
+               c_in: usize, c_out: usize, h_in: usize, w_in: usize,
+               kh: usize, kw: usize, stride: usize, padding: usize) {
+    let _pg = ProfileGuard::new(&PROF.conv2d_op);
+    let h_out = (h_in + 2 * padding - kh) / stride + 1;
+    let w_out = (w_in + 2 * padding - kw) / stride + 1;
+    let patch_size = c_in * kh * kw;
+    let spatial_out = h_out * w_out;
+    let cols = &mut cols[..patch_size * spatial_out];
 
     // Thread im2col across col_rows (each row is independent)
     let n_threads = get_num_threads();
@@ -1115,7 +1142,7 @@ pub fn conv2d(out: &mut [f32], input: &[f32], weight: &[f32], bias: Option<&[f32
             }
         });
     } else {
-        im2col(input, &mut cols, c_in, h_in, w_in, kh, kw, stride, padding, h_out, w_out);
+        im2col(input, cols, c_in, h_in, w_in, kh, kw, stride, padding, h_out, w_out);
     }
 
     // GEMM: weight[c_out, patch_size] @ cols[patch_size, spatial_out] = out[c_out, spatial_out]
