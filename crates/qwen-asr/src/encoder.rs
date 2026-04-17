@@ -24,6 +24,7 @@ pub struct EncLayer {
 }
 
 pub struct EncoderBuffers {
+    pub x: Vec<f32>,
     pub x_norm: Vec<f32>,
     pub q: Vec<f32>,
     pub k: Vec<f32>,
@@ -39,6 +40,7 @@ pub struct EncoderBuffers {
     pub reshaped: Vec<f32>,
     pub pe: Vec<f32>,
     pub conv_cols: Vec<f32>,
+    pub window_starts: Vec<i32>,
     pub cap_tokens: usize,
 }
 
@@ -51,6 +53,7 @@ impl Default for EncoderBuffers {
 impl EncoderBuffers {
     pub fn new() -> Self {
         EncoderBuffers {
+            x: Vec::new(),
             x_norm: Vec::new(),
             q: Vec::new(),
             k: Vec::new(),
@@ -66,6 +69,7 @@ impl EncoderBuffers {
             reshaped: Vec::new(),
             pe: Vec::new(),
             conv_cols: Vec::new(),
+            window_starts: Vec::new(),
             cap_tokens: 0,
         }
     }
@@ -82,6 +86,7 @@ impl EncoderBuffers {
         while new_cap < total_tokens {
             new_cap *= 2;
         }
+        self.x.resize(new_cap * d_model, 0.0);
         self.x_norm.resize(new_cap * d_model, 0.0);
         self.q.resize(new_cap * d_model, 0.0);
         self.k.resize(new_cap * d_model, 0.0);
@@ -272,7 +277,7 @@ impl Encoder {
         };
 
         // Main sequence buffer: [total_tokens, d_model]
-        let mut x = vec![0.0f32; total_tokens * d_model];
+        let td = total_tokens * d_model;
         let mut token_offset = 0;
 
         // Process each chunk through Conv2D + reshape + project + sinusoidal PE
@@ -366,7 +371,7 @@ impl Encoder {
             }
 
             // Project: [w3, 7680] -> [w3, d_model]
-            let projected = &mut x[token_offset * d_model..(token_offset + w3) * d_model];
+            let projected = &mut bufs.x[token_offset * d_model..(token_offset + w3) * d_model];
             kernels::linear_nobias(
                 projected,
                 reshaped,
@@ -387,21 +392,21 @@ impl Encoder {
         // Build attention window boundaries
         let window_token_size = tokens_per_chunk * (n_window_infer / chunk_size);
         let n_windows = total_tokens.div_ceil(window_token_size);
-        let mut window_starts = vec![0i32; n_windows + 1];
+        bufs.window_starts.resize(n_windows + 1, 0);
+        let window_starts = &mut bufs.window_starts[..n_windows + 1];
         for (w, ws) in window_starts.iter_mut().enumerate().take(n_windows) {
             *ws = (w * window_token_size) as i32;
         }
         window_starts[n_windows] = total_tokens as i32;
 
         let scale = 1.0 / (head_dim as f32).sqrt();
-        let td = total_tokens * d_model;
         let tf = total_tokens * ffn_dim;
 
         for layer in &self.layers {
             // Self-attention
             kernels::layer_norm(
                 &mut bufs.x_norm[..td],
-                &x,
+                &bufs.x[..td],
                 &layer.attn_norm_weight,
                 &layer.attn_norm_bias,
                 total_tokens,
@@ -452,7 +457,7 @@ impl Encoder {
 
             // Fused: x += wo_bias + attn_out @ wo_weight.T
             kernels::linear_accumulate(
-                &mut x,
+                &mut bufs.x[..td],
                 &bufs.attn_out[..td],
                 &layer.wo_weight,
                 Some(&layer.wo_bias),
@@ -464,7 +469,7 @@ impl Encoder {
             // FFN
             kernels::layer_norm(
                 &mut bufs.x_norm[..td],
-                &x,
+                &bufs.x[..td],
                 &layer.ffn_norm_weight,
                 &layer.ffn_norm_bias,
                 total_tokens,
@@ -484,7 +489,7 @@ impl Encoder {
             kernels::gelu(&mut bufs.ffn_mid[..tf], tf);
             // Fused: x += fc2_bias + ffn_mid @ fc2_weight.T
             kernels::linear_accumulate(
-                &mut x,
+                &mut bufs.x[..td],
                 &bufs.ffn_mid[..tf],
                 &layer.fc2_weight,
                 Some(&layer.fc2_bias),
@@ -497,19 +502,19 @@ impl Encoder {
         // Final LayerNorm: use x_norm as temp, then swap into x
         kernels::layer_norm(
             &mut bufs.x_norm[..td],
-            &x,
+            &bufs.x[..td],
             &self.ln_post_weight,
             &self.ln_post_bias,
             total_tokens,
             d_model,
             1e-5,
         );
-        x[..td].copy_from_slice(&bufs.x_norm[..td]);
+        bufs.x[..td].copy_from_slice(&bufs.x_norm[..td]);
 
         // Projection: proj1 (GELU) -> proj2 (reuse scratch buffers)
         kernels::linear(
             &mut bufs.q[..td],
-            &x,
+            &bufs.x[..td],
             &self.proj1_weight,
             Some(&self.proj1_bias),
             total_tokens,

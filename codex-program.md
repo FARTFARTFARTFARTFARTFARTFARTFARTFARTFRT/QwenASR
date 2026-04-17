@@ -63,23 +63,23 @@ Hard constraints for this document and the experiment loop:
 - Branch: `codex-auto-research`
 - Build: `RUSTFLAGS="-C target-cpu=native" cargo build --release` succeeded
 - Regression tests: `cargo test --release --test regression -- --nocapture` passed, but several cases self-skipped because the test harness expects specific local model/reference asset filenames
-- Benchmark working baseline from `bench/run.sh --label codex-exp-encoder-stem-workspace --runs 3`:
-  - offline: `1387ms`, `20.30x` realtime, `WER=0.0270`
-  - segmented: `1343ms`, `20.96x` realtime, `WER=0.0270`
-  - streaming: `5233ms`, `5.38x` realtime, `WER=0.0270`
-- Offline `--profile` snapshot on `bench/samples/audio.wav` after `exp-02`:
-  - total inference: `1417ms`
-  - encode: `378ms`
-  - decode: `1038ms`
+- Benchmark working baseline from `bench/run.sh --label codex-exp-encoder-x-reuse --runs 3`:
+  - offline: `1318ms`, `21.37x` realtime, `WER=0.0270`
+  - segmented: `1326ms`, `21.24x` realtime, `WER=0.0270`
+  - streaming: `5037ms`, `5.59x` realtime, `WER=0.0270`
+- Offline `--profile` snapshot on `bench/samples/audio.wav` after `exp-03`:
+  - total inference: `1472ms`
+  - encode: `387ms`
+  - decode: `1085ms`
   - hottest counters:
-    - `sgemm`: `442.6ms`
-    - `bf16_matvec`: `385.5ms`
-    - `attention_causal`: `249.6ms`
-    - `conv2d_op`: `125.1ms`
+    - `sgemm`: `476.0ms`
+    - `bf16_matvec`: `399.9ms`
+    - `attention_causal`: `252.3ms`
+    - `conv2d_op`: `126.6ms`
 - Initial read of this baseline:
   - decode remains the larger half of end-to-end latency
-  - encoder stem workspace reuse improved all measured modes while shaving encoder time and reducing allocator pressure in the conv path
-  - the next experiment should likely stay in the encoder/transcription memory-reuse area or move to a more explicit packed-weight path beyond plain row-major F32 copies
+  - encoder forward reuse of `x` and `window_starts` improved all three benchmark modes, even though the single `--profile` spot check was noisier than the benchmark sweep
+  - the next experiment should likely stay in encoder/transcription memory reuse, especially reducing the remaining `enc_output` allocation or window metadata rebuilds
 
 ### Kept Experiment Ledger
 
@@ -116,6 +116,15 @@ Template:
   - kept commit: `experiment: reuse encoder stem workspace`
   - notes: direct `--profile` reduced encode time from `392ms` to `378ms` and nudged `conv2d_op` from `128.8ms` to `125.1ms`; the larger end-to-end gain likely comes from removing repeated stem allocations across chunk processing rather than changing convolution math itself
 
+- `exp-03`
+  - date: `2026-04-17`
+  - hypothesis: reusing the encoder forward `x` activation buffer and attention `window_starts` metadata across calls will reduce per-call allocation overhead enough to improve end-to-end latency
+  - touched files: `crates/qwen-asr/src/encoder.rs`
+  - benchmark delta: offline `1387ms -> 1318ms`, segmented `1343ms -> 1326ms`, streaming `5233ms -> 5037ms`, WER unchanged at `0.0270`
+  - correctness check: `RUSTFLAGS="-C target-cpu=native" cargo build --release` succeeded; `cargo test --release --test regression -- --nocapture` passed
+  - kept commit: `experiment: reuse encoder forward buffers`
+  - notes: benchmark movement was clearly positive in all three modes, but the single direct `--profile` run did not improve proportionally; keep decision is based on the repeated benchmark sweep rather than that one noisier spot profile
+
 ## Current State Map
 
 This section must keep a strict distinction between `already optimized`, `partially optimized / still leaking cost`, and `missing opportunity`.
@@ -144,6 +153,10 @@ It is the map the agent should use to choose the next experiment.
   Evidence:
   - [crates/qwen-asr/src/encoder.rs](crates/qwen-asr/src/encoder.rs) stores reusable `chunk_mel`, `c1`, `c2`, `c3`, `reshaped`, `pe`, and `conv_cols` inside `EncoderBuffers`.
   - [crates/qwen-asr/src/kernels/mod.rs](crates/qwen-asr/src/kernels/mod.rs) exposes `conv2d_with_cols()` so encoder forward can avoid per-call `cols` allocation.
+- Encoder forward now reuses its main `x` activation buffer and `window_starts` metadata across calls.
+  Evidence:
+  - [crates/qwen-asr/src/encoder.rs](crates/qwen-asr/src/encoder.rs) stores reusable `x` and `window_starts` inside `EncoderBuffers`.
+  - [crates/qwen-asr/src/encoder.rs](crates/qwen-asr/src/encoder.rs) writes chunk projections and transformer updates directly into the reusable `x` slice.
 
 ### Partially optimized / still leaking cost
 
@@ -152,10 +165,10 @@ It is the map the agent should use to choose the next experiment.
   - [crates/qwen-asr/src/decoder.rs](crates/qwen-asr/src/decoder.rs) allocates fresh `x_norm` and `logits` in `decoder_prefill_logits()`.
   - [crates/qwen-asr/src/decoder.rs](crates/qwen-asr/src/decoder.rs) still calls `linear_nobias_bf16_scratch()` for `lm_head` projection in `decoder_prefill_logits()`.
 - Encoder convolution uses BLAS and threaded `im2col`, but per-chunk transient buffers are still rebuilt each call.
-- Encoder stem no longer rebuilds its major conv temporaries, but encoder forward still allocates a fresh top-level `x` output buffer and re-emits per-call attention window metadata.
+- Encoder stem and main forward activations are now reused, but encoder forward still allocates a fresh final `enc_output` return buffer on every call.
   Evidence:
-  - [crates/qwen-asr/src/encoder.rs](crates/qwen-asr/src/encoder.rs) still allocates `x` for each forward pass.
-  - [crates/qwen-asr/src/encoder.rs](crates/qwen-asr/src/encoder.rs) still rebuilds `chunk_sizes` and `window_starts` per call.
+  - [crates/qwen-asr/src/encoder.rs](crates/qwen-asr/src/encoder.rs) still allocates `enc_output` for each forward pass before returning.
+  - [crates/qwen-asr/src/encoder.rs](crates/qwen-asr/src/encoder.rs) still rebuilds `chunk_sizes` per call.
 - Streaming and segmented transcription reuse some state, but still copy large embedding buffers aggressively.
   Evidence:
   - [crates/qwen-asr/src/transcribe.rs](crates/qwen-asr/src/transcribe.rs) allocates `input_embeds`, `enc_output`, and `tmp_embed` on hot paths.
