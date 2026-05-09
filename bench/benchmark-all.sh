@@ -401,6 +401,48 @@ benchmark_c_target() {
     done
 }
 
+collect_system_info() {
+    local outfile="$1"
+    python3 - "$outfile" <<'PY'
+import json, sys, subprocess
+
+def safe_output(cmd):
+    try:
+        return subprocess.check_output(cmd, text=True).strip()
+    except Exception:
+        return "unknown"
+
+cpu_brand = safe_output(["sysctl", "-n", "machdep.cpu.brand_string"])
+physical_cores = safe_output(["sysctl", "-n", "hw.physicalcpu"])
+logical_cores = safe_output(["sysctl", "-n", "hw.logicalcpu"])
+memsize = safe_output(["sysctl", "-n", "hw.memsize"])
+memory_gb = "unknown"
+if memsize not in ("unknown", ""):
+    try:
+        memory_gb = round(int(memsize) / (1024 ** 3), 1)
+    except ValueError:
+        pass
+
+rustc_ver = safe_output(["rustc", "--version"])
+if rustc_ver and rustc_ver != "unknown":
+    rustc_ver = rustc_ver.splitlines()[0]
+
+info = {
+    "cpu_brand": cpu_brand,
+    "physical_cores": physical_cores,
+    "logical_cores": logical_cores,
+    "memory_gb": memory_gb,
+    "arch": safe_output(["uname", "-m"]),
+    "macos_version": safe_output(["sw_vers", "-productVersion"]),
+    "rustc_version": rustc_ver,
+}
+
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    json.dump(info, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+PY
+}
+
 generate_summary() {
     python3 - "$SUMMARY_DIR" "$ROOT_SUMMARY" <<'PY'
 import glob, json, os, sys
@@ -425,7 +467,8 @@ generate_report_and_charts() {
         --model-dir "$MODEL_DIR" \
         --input-file "$INPUT_FILE" \
         --runs "$RUNS" \
-        --modes "$MODES"
+        --modes "$MODES" \
+        --system-info "$SYSTEM_INFO_FILE"
 }
 
 ensure_python_env
@@ -440,6 +483,10 @@ ensure_c_clone "$TMP_DIR/antirez-qwen-asr"
 benchmark_rust_target "rust-before-accelerate" "rust-before" "$TMP_DIR/baseline-rust" "$BASELINE_SHORT"
 benchmark_rust_target "rust-current-accelerate" "rust-current" "$TMP_DIR/current-rust" "$CURRENT_SHORT"
 benchmark_c_target "c-antirez-accelerate" "$TMP_DIR/antirez-qwen-asr"
+
+SYSTEM_INFO_FILE="$REPORT_DIR/system_info.json"
+collect_system_info "$SYSTEM_INFO_FILE"
+log "System info saved to $SYSTEM_INFO_FILE"
 
 generate_summary
 generate_report_and_charts

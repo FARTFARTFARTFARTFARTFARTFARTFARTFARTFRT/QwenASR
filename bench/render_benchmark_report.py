@@ -33,6 +33,37 @@ def safe_check_output(cmd: list[str]) -> str:
         return "unknown"
 
 
+def memory_gb() -> str:
+    raw = safe_check_output(["sysctl", "-n", "hw.memsize"])
+    if raw and raw != "unknown":
+        try:
+            return str(round(int(raw) / (1024 ** 3), 1))
+        except ValueError:
+            pass
+    return "unknown"
+
+
+def load_system_info(path: Path | None) -> dict[str, str]:
+    defaults = {
+        "cpu_brand": safe_check_output(["sysctl", "-n", "machdep.cpu.brand_string"]),
+        "physical_cores": safe_check_output(["sysctl", "-n", "hw.physicalcpu"]),
+        "logical_cores": safe_check_output(["sysctl", "-n", "hw.logicalcpu"]),
+        "memory_gb": memory_gb(),
+        "arch": safe_check_output(["uname", "-m"]),
+        "macos_version": safe_check_output(["sw_vers", "-productVersion"]),
+        "rustc_version": safe_check_output(["rustc", "--version"]).splitlines()[0]
+        if safe_check_output(["rustc", "--version"]) != "unknown"
+        else "unknown",
+    }
+    if path and path.exists():
+        try:
+            data = load_json(path)
+            return {**defaults, **data}
+        except Exception:
+            pass
+    return defaults
+
+
 def pick_result(items: list[dict], impl: str, accelerate: bool, mode: str = "offline") -> dict | None:
     for item in items:
         if item.get("impl") == impl and item.get("accelerate") == accelerate and item.get("mode") == mode:
@@ -129,6 +160,7 @@ def build_markdown_report(
     input_file: str,
     runs: str,
     modes: str,
+    system_info: dict[str, str],
 ) -> str:
     accel_rows = chart_rows_from_summary(summary_items, baseline_ref, current_ref)
     accel_by_impl = {row["impl"]: row for row in accel_rows}
@@ -171,8 +203,12 @@ def build_markdown_report(
     lines.append("")
     lines.append("## Environment")
     lines.append("")
-    lines.append(f"- Machine arch: `{safe_check_output(['uname', '-m'])}`")
-    lines.append(f"- macOS: `{safe_check_output(['sw_vers', '-productVersion'])}`")
+    lines.append(f"- CPU: `{system_info.get('cpu_brand', 'unknown')}`")
+    lines.append(f"- Cores: `{system_info.get('physical_cores', 'unknown')} physical / {system_info.get('logical_cores', 'unknown')} logical`")
+    lines.append(f"- Memory: `{system_info.get('memory_gb', 'unknown')} GB`")
+    lines.append(f"- Machine arch: `{system_info.get('arch', 'unknown')}`")
+    lines.append(f"- macOS: `{system_info.get('macos_version', 'unknown')}`")
+    lines.append(f"- Rustc: `{system_info.get('rustc_version', 'unknown')}`")
     lines.append(f"- Model dir: `{model_dir}`")
     lines.append(f"- Input file: `{input_file}`")
     lines.append("")
@@ -209,6 +245,7 @@ def main() -> None:
     parser.add_argument("--input-file", required=True)
     parser.add_argument("--runs", required=True)
     parser.add_argument("--modes", required=True)
+    parser.add_argument("--system-info", default="")
     args = parser.parse_args()
 
     summary_path = Path(args.summary)
@@ -217,6 +254,7 @@ def main() -> None:
     charts_dir = Path(args.charts_dir)
 
     summary_items = load_json(summary_path)
+    system_info = load_system_info(Path(args.system_info) if args.system_info else None)
 
     accel_rows = chart_rows_from_summary(summary_items, args.baseline_ref, args.current_ref)
     accel_impls = {row["impl"] for row in accel_rows}
@@ -252,6 +290,7 @@ def main() -> None:
         args.input_file,
         args.runs,
         args.modes,
+        system_info,
     )
     report_path.write_text(report_content, encoding="utf-8")
     root_report_content = build_markdown_report(
@@ -264,6 +303,7 @@ def main() -> None:
         args.input_file,
         args.runs,
         args.modes,
+        system_info,
     )
     root_report_path.write_text(root_report_content, encoding="utf-8")
 

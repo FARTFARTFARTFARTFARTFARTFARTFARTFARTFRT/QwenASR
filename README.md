@@ -11,20 +11,20 @@ Performance optimizations were discovered autonomously using the [autoresearch](
 
 ## Benchmark
 
-Offline benchmark on macOS (Apple Silicon, Accelerate enabled, 3 runs average-of, 28.2s audio):
+Offline benchmark on macOS (Apple M5, Accelerate enabled, 3 runs best-of, 28.2s audio):
 
 | Implementation | Commit | Total ms | Realtime Factor |
 |---|---:|---:|---:|
-| before auto research | `bf52daf` | 2,672 | 10.54x |
-| after auto research | `31b66c7` | 1,398 | 20.15x |
-| pure C upstream | - | 2,909 | 9.68x |
+| before auto research | `bf52daf` | 1,747 | 16.12x |
+| after auto research | `80947fb` | 636 | 44.30x |
+| pure C upstream | [`b00b789`](https://github.com/antirez/qwen-asr/commit/b00b789) | 1,801 | 15.63x |
 
 ![Latency](bench/charts/benchmark-accelerate-latency.png)
 
 ![Realtime factor](bench/charts/benchmark-accelerate-rtf.png)
 
-- **1.91x** faster than the pre-optimization baseline
-- **2.08x** faster than the upstream pure C implementation
+- **2.75x** faster than the pre-optimization baseline
+- **2.83x** faster than the upstream pure C implementation
 
 Reproduce with `./bench/benchmark-all.sh`.
 
