@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/huanglizhuo/QwenASR/compare/qwen-asr-v0.7.0...qwen-asr-v0.7.1) (2026-05-14)
+
+
+### Bug Fixes
+
+* document qwen-asr WER benchmark scripts ([e49a138](https://github.com/huanglizhuo/QwenASR/commit/e49a138990422f0bda9d368bec7b7bf84683bd63))
+
 ## [0.7.0](https://github.com/huanglizhuo/QwenASR/compare/qwen-asr-v0.6.0...qwen-asr-v0.7.0) (2026-05-14)
 
 
