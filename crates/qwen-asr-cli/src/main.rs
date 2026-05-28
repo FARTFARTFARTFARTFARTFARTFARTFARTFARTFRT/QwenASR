@@ -9,6 +9,8 @@ use qwen_asr::{align, audio, config, context, kernels, transcribe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use std::io::{Read, Write};
+
 const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "mkv", "mov", "avi", "webm", "m4v", "flv", "ts", "mpg", "mpeg", "wmv",
 ];
@@ -198,6 +200,7 @@ fn main() {
     let mut search_sec: f32 = -1.0;
     let mut stream_mode = false;
     let mut vad_mode = false;
+    let mut stream_unfixed_chunks = 2;
     let mut stream_max_new_tokens: i32 = -1;
     let mut stream_chunk_sec: f32 = -1.0;
     let mut enc_window_sec: f32 = -1.0;
@@ -240,6 +243,10 @@ fn main() {
             }
             "--vad" => {
                 vad_mode = true;
+            }
+            "--stream-unfixed-chunks" => {
+                i += 2;
+                stream_unfixed_chunks = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(-1);
             }
             "--stream-max-new-tokens" => {
                 i += 1;
@@ -609,16 +616,71 @@ fn main() {
         return;
     }
 
-    // Transcribe
+    // stream_mode transcription should keep emitting output until EOF was read, at which point exit the loop and continue on.
     let text = if stream_mode {
-        let samples = if use_stdin {
-            audio::read_pcm_stdin()
+        if use_stdin {
+            // Live streaming: emit incrementally instead of only at finalize.
+            ctx.stream_unfixed_chunks = stream_unfixed_chunks; // defaults to 2. 1 can be buggy.
+            // optional: smaller --stream_chunk_sec for lower latency (default is 4 is faster than 8.)
+
+            let stream_via_cb = ctx.token_cb.is_some();
+            let mut stdin = std::io::stdin().lock();
+            let mut chunk = [0u8; 65536];
+            let mut leftover: Vec<u8> = Vec::new();
+            let mut all_samples: Vec<f32> = Vec::new(); // full accumulated buffer
+            let mut state = transcribe::StreamState::new();
+            let mut had_any_data = false;
+
+            loop {
+                let n = match stdin.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                had_any_data = true;
+
+                leftover.extend_from_slice(&chunk[..n]);
+                let even = leftover.len() & !1;
+                all_samples.extend(
+                    leftover[..even]
+                        .chunks_exact(2)
+                        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0),
+                );
+                leftover.drain(..even);
+
+                // Pass the FULL buffer. stream_push_audio advances state.audio_cursor
+                // and does no work until a full chunk (>= stream_chunk_sec) is available.
+                if let Some(delta) =
+                    transcribe::stream_push_audio(&mut ctx, &all_samples, &mut state, false)
+                {
+                    if !stream_via_cb && !delta.is_empty() {
+                        print!("{}", delta);
+                        let _ = std::io::stdout().flush();
+                    }
+                }
+            }
+
+            // EOF: process the final partial chunk and flush the withheld rollback tail.
+            if let Some(delta) =
+                transcribe::stream_push_audio(&mut ctx, &all_samples, &mut state, true)
+            {
+                if !stream_via_cb && !delta.is_empty() {
+                    print!("{}", delta);
+                }
+            }
+            println!(); // trailing newline
+
+            if !had_any_data {
+                eprintln!("no data on stdin...");
+            }
+            None
         } else {
-            load_audio(input_wav.as_ref().unwrap())
-        };
-        match samples {
-            Some(s) => transcribe::transcribe_stream(&mut ctx, &s),
-            None => None,
+            // wav streaming assumes completed file
+            let samples = load_audio(input_wav.as_ref().unwrap());
+            match samples {
+                Some(s) => transcribe::transcribe_stream(&mut ctx, &s),
+                None => None,
+            }
         }
     } else if use_stdin {
         transcribe::transcribe_stdin(&mut ctx)
@@ -643,8 +705,11 @@ fn main() {
             }
         }
         None => {
-            eprintln!("Transcription failed");
-            std::process::exit(1);
+            // streaming mode with stdin is expected to hit this case, so only error if a non‑streaming case failed.
+            if !(stream_mode && use_stdin) {
+                eprintln!("Transcription failed");
+                std::process::exit(1);
+            }
         }
     }
 

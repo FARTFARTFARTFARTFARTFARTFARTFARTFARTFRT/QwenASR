@@ -108,24 +108,19 @@ pub fn read_pcm_stdin() -> Option<Vec<f32>> {
         eprintln!("read_pcm_stdin: no data on stdin");
         return None;
     }
-
     if &buf[0..4] == b"RIFF" {
         if kernels::verbose() >= 2 {
             eprintln!("Detected WAV format on stdin");
         }
         return parse_wav_buffer(&buf);
     }
-
-    // Raw s16le 16kHz mono
     if kernels::verbose() >= 2 {
         eprintln!("Treating stdin as raw s16le 16kHz mono");
     }
-    let n_frames = buf.len() / 2;
-    let mut samples = vec![0.0f32; n_frames];
-    for i in 0..n_frames {
-        let val = i16::from_le_bytes([buf[i * 2], buf[i * 2 + 1]]);
-        samples[i] = val as f32 / 32768.0;
-    }
+    let samples = buf
+        .chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+        .collect();
     Some(samples)
 }
 
