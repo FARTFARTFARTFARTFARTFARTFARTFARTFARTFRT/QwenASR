@@ -744,32 +744,30 @@ pub fn decoder_forward(
             kv_dim,
         );
         #[cfg(not(target_arch = "aarch64"))]
-        unsafe {
-            kernels::linear_nobias_bf16(
-                &mut bufs.q[..q_dim],
-                &bufs.x_norm[..dim],
-                layer.wq_weight_bf16,
-                1,
-                dim,
-                q_dim,
-            );
-            kernels::linear_nobias_bf16(
-                &mut bufs.k[..kv_dim],
-                &bufs.x_norm[..dim],
-                layer.wk_weight_bf16,
-                1,
-                dim,
-                kv_dim,
-            );
-            kernels::linear_nobias_bf16(
-                &mut bufs.v[..kv_dim],
-                &bufs.x_norm[..dim],
-                layer.wv_weight_bf16,
-                1,
-                dim,
-                kv_dim,
-            );
-        }
+        kernels::linear_nobias_bf16(
+            &mut bufs.q[..q_dim],
+            &bufs.x_norm[..dim],
+            layer.wq_weight_bf16,
+            1,
+            dim,
+            q_dim,
+        );
+        kernels::linear_nobias_bf16(
+            &mut bufs.k[..kv_dim],
+            &bufs.x_norm[..dim],
+            layer.wk_weight_bf16,
+            1,
+            dim,
+            kv_dim,
+        );
+        kernels::linear_nobias_bf16(
+            &mut bufs.v[..kv_dim],
+            &bufs.x_norm[..dim],
+            layer.wv_weight_bf16,
+            1,
+            dim,
+            kv_dim,
+        );
 
         kernels::rms_norm_per_head(
             &mut bufs.q[..q_dim],

@@ -1,5 +1,7 @@
 //! WAV loading, resampling, and mel spectrogram computation.
 
+use std::collections::VecDeque;
+
 use crate::config::*;
 use crate::kernels;
 
@@ -108,24 +110,19 @@ pub fn read_pcm_stdin() -> Option<Vec<f32>> {
         eprintln!("read_pcm_stdin: no data on stdin");
         return None;
     }
-
     if &buf[0..4] == b"RIFF" {
         if kernels::verbose() >= 2 {
             eprintln!("Detected WAV format on stdin");
         }
         return parse_wav_buffer(&buf);
     }
-
-    // Raw s16le 16kHz mono
     if kernels::verbose() >= 2 {
         eprintln!("Treating stdin as raw s16le 16kHz mono");
     }
-    let n_frames = buf.len() / 2;
-    let mut samples = vec![0.0f32; n_frames];
-    for i in 0..n_frames {
-        let val = i16::from_le_bytes([buf[i * 2], buf[i * 2 + 1]]);
-        samples[i] = val as f32 / 32768.0;
-    }
+    let samples = buf
+        .chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+        .collect();
     Some(samples)
 }
 
@@ -376,6 +373,86 @@ pub fn mel_spectrogram(samples: &[f32]) -> Option<(Vec<f32>, usize)> {
     }
 
     Some((mel, n_frames))
+}
+
+/// Streaming voice-activity gate using adaptive RMS energy thresholding.
+///
+/// Classifies fixed-size windows of 16 kHz audio as speech or silence. The
+/// threshold is derived from a rolling window of recent smoothed RMS — the
+/// 25th-percentile noise floor scaled up — matching [`compact_silence`], so it
+/// self-calibrates to the source (mic, system audio, file) instead of relying
+/// on a hand-tuned constant. Pass exactly [`VadGate::WINDOW`] samples to
+/// [`VadGate::classify`].
+pub struct VadGate {
+    smooth: f32,
+    smoothed_init: bool,
+    history: VecDeque<f32>,
+    history_cap: usize,
+    fixed_threshold: Option<f32>,
+    min_threshold: f32,
+    max_threshold: f32,
+}
+
+impl VadGate {
+    /// Window size in samples: 30 ms at 16 kHz.
+    pub const WINDOW: usize = 480;
+
+    /// `fixed_threshold = Some(v)` forces a constant RMS threshold; `None` uses
+    /// the adaptive percentile estimate.
+    pub fn new(fixed_threshold: Option<f32>) -> Self {
+        VadGate {
+            smooth: 0.0,
+            smoothed_init: false,
+            // ~3 s of 30 ms windows: responsive without chasing momentary dips.
+            history: VecDeque::with_capacity(100),
+            history_cap: 100,
+            fixed_threshold,
+            // Floor low enough to catch quiet onsets; ceiling keeps a loud
+            // passage from raising the bar past normal speech.
+            min_threshold: 0.0015,
+            max_threshold: 0.02,
+        }
+    }
+
+    /// Classify one window. Returns `true` for speech.
+    pub fn classify(&mut self, window: &[f32]) -> bool {
+        let n = window.len().max(1);
+        let sum_sq: f32 = window.iter().map(|&s| s * s).sum();
+        let rms = (sum_sq / n as f32).sqrt();
+
+        const ALPHA: f32 = 0.2; // matches compact_silence
+        if self.smoothed_init {
+            self.smooth = (1.0 - ALPHA) * self.smooth + ALPHA * rms;
+        } else {
+            self.smooth = rms;
+            self.smoothed_init = true;
+        }
+
+        let threshold = match self.fixed_threshold {
+            Some(t) => t,
+            None => self.adaptive_threshold(),
+        };
+
+        // Update history *after* judging, so an onset doesn't instantly raise
+        // its own bar.
+        self.history.push_back(self.smooth);
+        if self.history.len() > self.history_cap {
+            self.history.pop_front();
+        }
+
+        self.smooth > threshold
+    }
+
+    fn adaptive_threshold(&self) -> f32 {
+        if self.history.len() < 8 {
+            return self.min_threshold; // cold start
+        }
+        let mut sorted: Vec<f32> = self.history.iter().copied().collect();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let p25 = ((sorted.len() - 1) as f32 * 0.25) as usize;
+        let noise_floor = sorted[p25];
+        (noise_floor * 1.8).clamp(self.min_threshold, self.max_threshold)
+    }
 }
 
 /// Drop long silent spans. Adaptive RMS gating with spike rejection.

@@ -9,6 +9,8 @@ use qwen_asr::{align, audio, config, context, kernels, transcribe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use std::io::{Read, Write};
+
 const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "mkv", "mov", "avi", "webm", "m4v", "flv", "ts", "mpg", "mpeg", "wmv",
 ];
@@ -198,6 +200,9 @@ fn main() {
     let mut search_sec: f32 = -1.0;
     let mut stream_mode = false;
     let mut vad_mode = false;
+    let mut vad_threshold: Option<f32> = None; // None = adaptive
+    let mut vad_silence_sec: f32 = 1.5; // hangover that ends an utterance
+    let mut stream_unfixed_chunks = 2;
     let mut stream_max_new_tokens: i32 = -1;
     let mut stream_chunk_sec: f32 = -1.0;
     let mut enc_window_sec: f32 = -1.0;
@@ -240,6 +245,20 @@ fn main() {
             }
             "--vad" => {
                 vad_mode = true;
+            }
+            "--vad-threshold" => {
+                i += 1;
+                vad_threshold = args.get(i).and_then(|s| s.parse().ok());
+            }
+            "--vad-silence" => {
+                i += 1;
+                if let Some(v) = args.get(i).and_then(|s| s.parse::<f32>().ok()) {
+                    vad_silence_sec = v;
+                }
+            }
+            "--stream-unfixed-chunks" => {
+                i += 1;
+                stream_unfixed_chunks = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(-1);
             }
             "--stream-max-new-tokens" => {
                 i += 1;
@@ -609,16 +628,18 @@ fn main() {
         return;
     }
 
-    // Transcribe
+    // stream_mode transcription should keep emitting output until EOF was read, at which point exit the loop and continue on.
     let text = if stream_mode {
-        let samples = if use_stdin {
-            audio::read_pcm_stdin()
+        if use_stdin {
+            ctx.stream_unfixed_chunks = stream_unfixed_chunks;
+            run_stream_stdin(&mut ctx, verbosity, vad_threshold, vad_silence_sec);
+            None
         } else {
-            load_audio(input_wav.as_ref().unwrap())
-        };
-        match samples {
-            Some(s) => transcribe::transcribe_stream(&mut ctx, &s),
-            None => None,
+            // WAV streaming assumes a completed file.
+            match load_audio(input_wav.as_ref().unwrap()) {
+                Some(s) => transcribe::transcribe_stream(&mut ctx, &s),
+                None => None,
+            }
         }
     } else if use_stdin {
         transcribe::transcribe_stdin(&mut ctx)
@@ -643,8 +664,11 @@ fn main() {
             }
         }
         None => {
-            eprintln!("Transcription failed");
-            std::process::exit(1);
+            // streaming mode with stdin is expected to hit this case, so only error if a non‑streaming case failed.
+            if !(stream_mode && use_stdin) {
+                eprintln!("Transcription failed");
+                std::process::exit(1);
+            }
         }
     }
 
@@ -673,6 +697,195 @@ fn main() {
 
     if profile {
         kernels::profile_report();
+    }
+}
+
+// ========================================================================
+// VAD-gated streaming from stdin
+// ========================================================================
+//
+// Mid-utterance transcription with clean pause handling. An adaptive energy
+// gate decides utterance boundaries; stream_push_audio runs continuously so
+// words appear as spoken. When the gate sees silence past the hangover, the
+// in-flight tail is flushed and StreamState is reset — a pause becomes a clean
+// boundary instead of corrupting carried decoder context.
+//
+// stdin is treated as raw little-endian s16 PCM, 16 kHz mono (what
+// `arecord -f S16_LE -r 16000 -c 1` emits). Silence is measured in audio
+// samples, not wall-clock, so a piped file arriving faster than real time still
+// segments correctly.
+fn run_stream_stdin(
+    ctx: &mut QwenCtx,
+    verbosity: i32,
+    vad_threshold: Option<f32>,
+    vad_silence_sec: f32,
+) {
+    use std::collections::VecDeque;
+    use std::sync::mpsc::RecvTimeoutError;
+
+    ctx.reset_perf();
+
+    let sr = SAMPLE_RATE as usize;
+    let win = audio::VadGate::WINDOW;
+    let hangover_samples = (vad_silence_sec * sr as f32) as usize;
+    let lookback_samples = sr / 4; // 250 ms pre-speech, avoids clipping onsets
+    let min_speech_samples = sr / 5; // 200 ms of real speech to count as an utterance
+    let max_utterance_samples = 30 * sr; // force a boundary if speech never pauses
+
+    // Normal/debug mode streams through ctx.token_cb; --silent mode prints the
+    // returned delta. Guard the delta print so we never double-emit.
+    let via_cb = ctx.token_cb.is_some();
+
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let reader_thread = std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let mut buf = [0u8; 65536];
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut gate = audio::VadGate::new(vad_threshold);
+
+    let mut leftover: Vec<u8> = Vec::new(); // odd-byte carry between reads
+    let mut window_buf: Vec<f32> = Vec::new(); // samples not yet forming a window
+
+    let mut speech_active = false;
+    let mut silence_run = 0usize;
+    let mut utterance_speech = 0usize;
+    let mut utterance: Vec<f32> = Vec::new();
+    let mut lookback: VecDeque<f32> = VecDeque::with_capacity(lookback_samples + win);
+    let mut state = transcribe::StreamState::new();
+    let mut had_any_data = false;
+
+    // Finalize the current utterance: commit the rollback tail and emit it. Does
+    // NOT touch VAD state — in-loop callers reset what they need; the EOF caller
+    // doesn't need to.
+    macro_rules! flush_utterance {
+        () => {{
+            if utterance_speech >= min_speech_samples {
+                let delta = transcribe::stream_push_audio(ctx, &utterance, &mut state, true);
+                if !via_cb {
+                    if let Some(d) = delta {
+                        if !d.is_empty() {
+                            print!("{}", d);
+                        }
+                    }
+                }
+                print!(" ");
+                let _ = std::io::stdout().flush();
+                if verbosity >= 2 {
+                    eprintln!(
+                        "\n[vad] utterance end ({:.1}s speech)",
+                        utterance_speech as f32 / sr as f32
+                    );
+                }
+            }
+        }};
+    }
+
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(chunk) => {
+                had_any_data = true;
+                leftover.extend_from_slice(&chunk);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        while let Ok(chunk) = rx.try_recv() {
+            had_any_data = true;
+            leftover.extend_from_slice(&chunk);
+        }
+
+        // bytes -> f32 samples (16-bit LE)
+        let even = leftover.len() & !1;
+        if even > 0 {
+            window_buf.extend(
+                leftover[..even]
+                    .chunks_exact(2)
+                    .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0),
+            );
+            leftover.drain(..even);
+        }
+
+        // VAD state machine, one fixed window at a time
+        while window_buf.len() >= win {
+            let window: Vec<f32> = window_buf.drain(..win).collect();
+            let is_speech = gate.classify(&window);
+
+            if speech_active {
+                utterance.extend_from_slice(&window);
+                if utterance.len() >= max_utterance_samples {
+                    flush_utterance!();
+                    state.reset();
+                    utterance.clear();
+                    speech_active = false;
+                    continue;
+                }
+                if is_speech {
+                    silence_run = 0;
+                    utterance_speech += win;
+                } else {
+                    silence_run += win;
+                    if silence_run >= hangover_samples {
+                        flush_utterance!();
+                        state.reset();
+                        utterance.clear();
+                        speech_active = false;
+                        continue;
+                    }
+                }
+            } else {
+                lookback.extend(window.iter().copied());
+                while lookback.len() > lookback_samples {
+                    lookback.pop_front();
+                }
+                if is_speech {
+                    if verbosity >= 2 {
+                        eprintln!("\n[vad] speech start");
+                    }
+                    speech_active = true;
+                    silence_run = 0;
+                    utterance_speech = win;
+                    utterance.clear();
+                    utterance.extend(lookback.drain(..));
+                    utterance.extend_from_slice(&window);
+                }
+            }
+        }
+
+        // mid-utterance streaming: drain any full chunks accumulated so far
+        if speech_active {
+            let delta = transcribe::stream_push_audio(ctx, &utterance, &mut state, false);
+            if !via_cb {
+                if let Some(d) = delta {
+                    if !d.is_empty() {
+                        print!("{}", d);
+                        let _ = std::io::stdout().flush();
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = reader_thread.join();
+
+    if speech_active {
+        flush_utterance!(); // flush whatever was in flight at EOF
+    }
+    println!();
+
+    if !had_any_data {
+        eprintln!("no data on stdin...");
     }
 }
 
