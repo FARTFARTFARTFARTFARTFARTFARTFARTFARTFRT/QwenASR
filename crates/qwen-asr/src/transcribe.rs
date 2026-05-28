@@ -104,12 +104,17 @@ fn stream_tail_repeat_blocks(tokens: &[i32], max_period: usize) -> (usize, usize
     for p in 1..=period_cap {
         let mut reps = 1usize;
         while (reps + 1) * p <= n {
-            let a = &tokens[n - (reps + 1) * p .. n - reps * p];
-            let b = &tokens[n - reps * p       .. n - (reps - 1) * p];
-            if a != b { break; }
+            let a = &tokens[n - (reps + 1) * p..n - reps * p];
+            let b = &tokens[n - reps * p..n - (reps - 1) * p];
+            if a != b {
+                break;
+            }
             reps += 1;
         }
-        if reps > best_reps { best_reps = reps; best_period = p; }
+        if reps > best_reps {
+            best_reps = reps;
+            best_period = p;
+        }
     }
     (best_reps, best_period)
 }
@@ -221,7 +226,7 @@ fn transcribe_segment(
     for (i, &tok) in SUFFIX_BASE.iter().enumerate() {
         unsafe {
             tok_embed_bf16_to_f32(
-            &mut input_embeds[(suffix_off + i) * dim..(suffix_off + i + 1) * dim],
+                &mut input_embeds[(suffix_off + i) * dim..(suffix_off + i + 1) * dim],
                 tok_emb,
                 tok,
                 dim,
@@ -234,8 +239,8 @@ fn transcribe_segment(
         for (i, &tok) in ftoks.iter().enumerate() {
             unsafe {
                 tok_embed_bf16_to_f32(
-                &mut input_embeds[(suffix_off + SUFFIX_BASE.len() + i) * dim
-                    ..(suffix_off + SUFFIX_BASE.len() + i + 1) * dim],
+                    &mut input_embeds[(suffix_off + SUFFIX_BASE.len() + i) * dim
+                        ..(suffix_off + SUFFIX_BASE.len() + i + 1) * dim],
                     tok_emb,
                     tok,
                     dim,
@@ -250,7 +255,7 @@ fn transcribe_segment(
         for (i, &tok) in ptoks.iter().enumerate() {
             unsafe {
                 tok_embed_bf16_to_f32(
-                &mut input_embeds[(past_off + i) * dim..(past_off + i + 1) * dim],
+                    &mut input_embeds[(past_off + i) * dim..(past_off + i + 1) * dim],
                     tok_emb,
                     tok,
                     dim,
@@ -446,7 +451,11 @@ pub fn transcribe_segmented(ctx: &mut QwenCtx, samples: &[f32]) -> Option<Vec<Tr
         return None;
     }
 
-    let segment_sec = if ctx.segment_sec > 0.0 { ctx.segment_sec } else { 30.0 };
+    let segment_sec = if ctx.segment_sec > 0.0 {
+        ctx.segment_sec
+    } else {
+        30.0
+    };
     let search_sec = ctx.search_sec.min(segment_sec / 2.0);
     let target_samples = (segment_sec * SAMPLE_RATE as f32) as usize;
     let margin_samples = (search_sec * SAMPLE_RATE as f32) as usize;
@@ -472,7 +481,11 @@ pub fn transcribe_segmented(ctx: &mut QwenCtx, samples: &[f32]) -> Option<Vec<Tr
         };
         if let Some((text, _)) = transcribe_segment(ctx, seg_ptr, &tokenizer, None) {
             if !text.is_empty() {
-                segments.push(TranscriptSegment { start_ms, end_ms, text });
+                segments.push(TranscriptSegment {
+                    start_ms,
+                    end_ms,
+                    text,
+                });
             }
         }
         return Some(segments);
@@ -493,7 +506,11 @@ pub fn transcribe_segmented(ctx: &mut QwenCtx, samples: &[f32]) -> Option<Vec<Tr
 
     for s in 0..n_splits {
         let seg_start = splits[s];
-        let seg_end = if s + 1 < n_splits { splits[s + 1] } else { samples.len() };
+        let seg_end = if s + 1 < n_splits {
+            splits[s + 1]
+        } else {
+            samples.len()
+        };
         let seg_len = seg_end - seg_start;
 
         let start_ms = (seg_start as u64 * 1000) / SAMPLE_RATE as u64;
@@ -524,7 +541,11 @@ pub fn transcribe_segmented(ctx: &mut QwenCtx, samples: &[f32]) -> Option<Vec<Tr
             continue;
         }
 
-        segments.push(TranscriptSegment { start_ms, end_ms, text });
+        segments.push(TranscriptSegment {
+            start_ms,
+            end_ms,
+            text,
+        });
     }
 
     Some(segments)
@@ -646,9 +667,9 @@ pub fn transcribe_audio(ctx: &mut QwenCtx, samples: &[f32]) -> Option<String> {
 
         let (seg_text, _seg_text_tokens) =
             match transcribe_segment(ctx, seg_ptr, &tokenizer, past_tokens.as_deref()) {
-            Some(r) => r,
-            None => continue,
-        };
+                Some(r) => r,
+                None => continue,
+            };
 
         if seg_text.is_empty() {
             continue;
@@ -928,7 +949,7 @@ pub fn transcribe_stream(ctx: &mut QwenCtx, samples: &[f32]) -> Option<String> {
         for (i, &tok) in SUFFIX_BASE.iter().enumerate() {
             unsafe {
                 tok_embed_bf16_to_f32(
-                &mut input_embeds[(suffix_off + i) * dim..(suffix_off + i + 1) * dim],
+                    &mut input_embeds[(suffix_off + i) * dim..(suffix_off + i + 1) * dim],
                     tok_emb,
                     tok,
                     dim,
@@ -940,8 +961,8 @@ pub fn transcribe_stream(ctx: &mut QwenCtx, samples: &[f32]) -> Option<String> {
             for (i, &tok) in ftoks.iter().enumerate() {
                 unsafe {
                     tok_embed_bf16_to_f32(
-                    &mut input_embeds[(suffix_off + SUFFIX_BASE.len() + i) * dim
-                        ..(suffix_off + SUFFIX_BASE.len() + i + 1) * dim],
+                        &mut input_embeds[(suffix_off + SUFFIX_BASE.len() + i) * dim
+                            ..(suffix_off + SUFFIX_BASE.len() + i + 1) * dim],
                         tok_emb,
                         tok,
                         dim,
@@ -955,7 +976,7 @@ pub fn transcribe_stream(ctx: &mut QwenCtx, samples: &[f32]) -> Option<String> {
         for i in 0..n_prefix_tokens {
             unsafe {
                 tok_embed_bf16_to_f32(
-                &mut input_embeds[(text_off + i) * dim..(text_off + i + 1) * dim],
+                    &mut input_embeds[(text_off + i) * dim..(text_off + i + 1) * dim],
                     tok_emb,
                     raw_tokens[i],
                     dim,
@@ -1132,9 +1153,9 @@ pub fn transcribe_stream(ctx: &mut QwenCtx, samples: &[f32]) -> Option<String> {
     }
 
     Some(String::from_utf8_lossy(&result_bytes).trim().to_string())
-}// ========================================================================
-// Incremental Streaming API
-// ========================================================================
+} // ========================================================================
+  // Incremental Streaming API
+  // ========================================================================
 
 /// Encoder window cached output.
 struct EncWindow {
@@ -1305,40 +1326,40 @@ pub fn stream_push_audio(
         state.audio_cursor = (state.audio_cursor + chunk_samples).min(samples.len());
         let is_final = finalize && state.audio_cursor >= samples.len();
 
-    // ---- Encoder: only encode new windows ----
-    let t0 = get_time_ms();
-    let full_end = (state.audio_cursor / enc_window_samples) * enc_window_samples;
+        // ---- Encoder: only encode new windows ----
+        let t0 = get_time_ms();
+        let full_end = (state.audio_cursor / enc_window_samples) * enc_window_samples;
 
-    // Cache newly completed windows (base offset accounts for windows cleared on re-anchor)
+        // Cache newly completed windows (base offset accounts for windows cleared on re-anchor)
         while (state.enc_cache_base_windows + state.enc_cache.len()) * enc_window_samples < full_end
         {
-        let ws = (state.enc_cache_base_windows + state.enc_cache.len()) * enc_window_samples;
-        let (mel, mel_frames) = audio::mel_spectrogram(&samples[ws..ws + enc_window_samples])?;
+            let ws = (state.enc_cache_base_windows + state.enc_cache.len()) * enc_window_samples;
+            let (mel, mel_frames) = audio::mel_spectrogram(&samples[ws..ws + enc_window_samples])?;
             let (win_enc, win_seq) =
                 ctx.encoder
                     .forward(&cfg, &mel, mel_frames, Some(&mut ctx.enc_bufs))?;
             let row_keys = prefill_embed_keys(&win_enc, win_seq, dim);
-        state.enc_cached_seq_total += win_seq;
+            state.enc_cached_seq_total += win_seq;
             state.enc_cache.push(EncWindow {
                 seq_len: win_seq,
                 enc_output: win_enc,
                 row_keys,
             });
-    }
+        }
 
-    // Encode partial tail — with lazy re-encoding for LCP optimization.
-    // Only re-encode when enough new audio has accumulated (every 2 chunks),
-    // on the first chunk, or when finalizing. On skip chunks, the reused
-    // encoder output gives near-perfect LCP matching, cutting prefill cost.
-    let enc_update_threshold = chunk_samples * 2;
-    let partial_age = state.audio_cursor.saturating_sub(state.last_partial_cursor);
+        // Encode partial tail — with lazy re-encoding for LCP optimization.
+        // Only re-encode when enough new audio has accumulated (every 2 chunks),
+        // on the first chunk, or when finalizing. On skip chunks, the reused
+        // encoder output gives near-perfect LCP matching, cutting prefill cost.
+        let enc_update_threshold = chunk_samples * 2;
+        let partial_age = state.audio_cursor.saturating_sub(state.last_partial_cursor);
         let need_encode =
             state.last_partial_cursor == 0 || partial_age >= enc_update_threshold || is_final;
 
-    let partial_seq;
-    let partial_enc;
+        let partial_seq;
+        let partial_enc;
         let partial_keys;
-    if need_encode && full_end < state.audio_cursor {
+        if need_encode && full_end < state.audio_cursor {
             if let Some((mel, mel_frames)) =
                 audio::mel_spectrogram(&samples[full_end..state.audio_cursor])
             {
@@ -1346,65 +1367,65 @@ pub fn stream_push_audio(
                     ctx.encoder
                         .forward(&cfg, &mel, mel_frames, Some(&mut ctx.enc_bufs))
                 {
-                partial_seq = seq;
+                    partial_seq = seq;
                     partial_keys = prefill_embed_keys(&enc, seq, dim);
-                partial_enc = enc;
-                state.last_partial_cursor = state.audio_cursor;
-                state.last_partial_enc = partial_enc.clone();
+                    partial_enc = enc;
+                    state.last_partial_cursor = state.audio_cursor;
+                    state.last_partial_enc = partial_enc.clone();
                     state.last_partial_keys = partial_keys.clone();
-                state.last_partial_seq = partial_seq;
+                    state.last_partial_seq = partial_seq;
+                } else {
+                    partial_seq = state.last_partial_seq;
+                    partial_enc = state.last_partial_enc.clone();
+                    partial_keys = state.last_partial_keys.clone();
+                }
             } else {
                 partial_seq = state.last_partial_seq;
                 partial_enc = state.last_partial_enc.clone();
-                    partial_keys = state.last_partial_keys.clone();
+                partial_keys = state.last_partial_keys.clone();
             }
-        } else {
+        } else if full_end < state.audio_cursor {
+            // Reuse previous partial encoding (skip chunk)
             partial_seq = state.last_partial_seq;
             partial_enc = state.last_partial_enc.clone();
-                partial_keys = state.last_partial_keys.clone();
-        }
-    } else if full_end < state.audio_cursor {
-        // Reuse previous partial encoding (skip chunk)
-        partial_seq = state.last_partial_seq;
-        partial_enc = state.last_partial_enc.clone();
             partial_keys = state.last_partial_keys.clone();
-    } else {
-        partial_seq = 0;
-        partial_enc = Vec::new();
+        } else {
+            partial_seq = 0;
+            partial_enc = Vec::new();
             partial_keys = Vec::new();
-    }
+        }
 
-    let enc_seq_len = state.enc_cached_seq_total + partial_seq;
-    if enc_seq_len == 0 {
-        state.chunk_idx += 1;
-        return Some(String::new());
-    }
+        let enc_seq_len = state.enc_cached_seq_total + partial_seq;
+        if enc_seq_len == 0 {
+            state.chunk_idx += 1;
+            return Some(String::new());
+        }
 
-    let enc_ms = elapsed_ms(t0);
-    ctx.perf_encode_ms += enc_ms;
+        let enc_ms = elapsed_ms(t0);
+        ctx.perf_encode_ms += enc_ms;
 
-    // ---- Prefix rollback ----
-    let n_prefix_tokens = if ctx.past_text_conditioning
-        && state.chunk_idx >= unfixed_chunks
-        && !state.raw_tokens.is_empty()
-    {
-        (state.raw_tokens.len() as i32 - rollback).max(0) as usize
-    } else {
-        0
-    };
+        // ---- Prefix rollback ----
+        let n_prefix_tokens = if ctx.past_text_conditioning
+            && state.chunk_idx >= unfixed_chunks
+            && !state.raw_tokens.is_empty()
+        {
+            (state.raw_tokens.len() as i32 - rollback).max(0) as usize
+        } else {
+            0
+        };
 
-    // ---- Build input embeddings ----
-    let n_prompt_tokens = ctx.prompt_tokens.as_ref().map_or(0, |t| t.len());
-    let n_force_prompt_tokens = ctx.force_prompt_tokens.as_ref().map_or(0, |t| t.len());
-    let prefix_len = PREFIX_HEAD.len() + n_prompt_tokens + PREFIX_TAIL.len();
-    let suffix_len = SUFFIX_BASE.len() + n_force_prompt_tokens;
-    let total_seq = prefix_len + enc_seq_len + suffix_len + n_prefix_tokens;
+        // ---- Build input embeddings ----
+        let n_prompt_tokens = ctx.prompt_tokens.as_ref().map_or(0, |t| t.len());
+        let n_force_prompt_tokens = ctx.force_prompt_tokens.as_ref().map_or(0, |t| t.len());
+        let prefix_len = PREFIX_HEAD.len() + n_prompt_tokens + PREFIX_TAIL.len();
+        let suffix_len = SUFFIX_BASE.len() + n_force_prompt_tokens;
+        let total_seq = prefix_len + enc_seq_len + suffix_len + n_prefix_tokens;
 
-    let mut input_embeds = vec![0.0f32; total_seq * dim];
+        let mut input_embeds = vec![0.0f32; total_seq * dim];
         let mut prefill_keys = vec![PrefillRowKey { a: 0, b: 0 }; total_seq];
-    let mut off = 0;
+        let mut off = 0;
 
-    for &tok in PREFIX_HEAD {
+        for &tok in PREFIX_HEAD {
             unsafe {
                 tok_embed_bf16_to_f32(
                     &mut input_embeds[off * dim..(off + 1) * dim],
@@ -1414,10 +1435,10 @@ pub fn stream_push_audio(
                 );
             }
             prefill_keys[off] = prefill_token_key(tok);
-        off += 1;
-    }
-    if let Some(ref ptoks) = ctx.prompt_tokens {
-        for &tok in ptoks {
+            off += 1;
+        }
+        if let Some(ref ptoks) = ctx.prompt_tokens {
+            for &tok in ptoks {
                 unsafe {
                     tok_embed_bf16_to_f32(
                         &mut input_embeds[off * dim..(off + 1) * dim],
@@ -1427,10 +1448,10 @@ pub fn stream_push_audio(
                     );
                 }
                 prefill_keys[off] = prefill_token_key(tok);
-            off += 1;
+                off += 1;
+            }
         }
-    }
-    for &tok in PREFIX_TAIL {
+        for &tok in PREFIX_TAIL {
             unsafe {
                 tok_embed_bf16_to_f32(
                     &mut input_embeds[off * dim..(off + 1) * dim],
@@ -1440,8 +1461,8 @@ pub fn stream_push_audio(
                 );
             }
             prefill_keys[off] = prefill_token_key(tok);
-        off += 1;
-    }
+            off += 1;
+        }
 
         let mut enc_key_off = 0;
         for w in &state.enc_cache {
@@ -1467,275 +1488,275 @@ pub fn stream_push_audio(
             input_embeds
                 [(prefix_len + enc_embed_off) * dim..(prefix_len + enc_embed_off) * dim + n]
                 .copy_from_slice(&partial_enc);
-    }
+        }
 
-    let suffix_off = prefix_len + enc_seq_len;
-    for (i, &tok) in SUFFIX_BASE.iter().enumerate() {
+        let suffix_off = prefix_len + enc_seq_len;
+        for (i, &tok) in SUFFIX_BASE.iter().enumerate() {
             unsafe {
                 tok_embed_bf16_to_f32(
-            &mut input_embeds[(suffix_off + i) * dim..(suffix_off + i + 1) * dim],
+                    &mut input_embeds[(suffix_off + i) * dim..(suffix_off + i + 1) * dim],
                     tok_emb,
                     tok,
                     dim,
                 );
             }
             prefill_keys[suffix_off + i] = prefill_token_key(tok);
-    }
-    if let Some(ref ftoks) = ctx.force_prompt_tokens {
-        for (i, &tok) in ftoks.iter().enumerate() {
+        }
+        if let Some(ref ftoks) = ctx.force_prompt_tokens {
+            for (i, &tok) in ftoks.iter().enumerate() {
                 unsafe {
                     tok_embed_bf16_to_f32(
-                &mut input_embeds[(suffix_off + SUFFIX_BASE.len() + i) * dim
-                    ..(suffix_off + SUFFIX_BASE.len() + i + 1) * dim],
+                        &mut input_embeds[(suffix_off + SUFFIX_BASE.len() + i) * dim
+                            ..(suffix_off + SUFFIX_BASE.len() + i + 1) * dim],
                         tok_emb,
                         tok,
                         dim,
                     );
                 }
                 prefill_keys[suffix_off + SUFFIX_BASE.len() + i] = prefill_token_key(tok);
+            }
         }
-    }
 
-    let text_off = suffix_off + suffix_len;
-    for i in 0..n_prefix_tokens {
+        let text_off = suffix_off + suffix_len;
+        for i in 0..n_prefix_tokens {
             unsafe {
                 tok_embed_bf16_to_f32(
-            &mut input_embeds[(text_off + i) * dim..(text_off + i + 1) * dim],
+                    &mut input_embeds[(text_off + i) * dim..(text_off + i + 1) * dim],
                     tok_emb,
                     state.raw_tokens[i],
                     dim,
                 );
             }
             prefill_keys[text_off + i] = prefill_token_key(state.raw_tokens[i]);
-    }
+        }
 
-    // ---- Decoder prefill with LCP reuse ----
-    let t0 = get_time_ms();
-    let prefill_len = total_seq - 1;
+        // ---- Decoder prefill with LCP reuse ----
+        let t0 = get_time_ms();
+        let prefill_len = total_seq - 1;
 
         let reused_prefill = prefill_lcp_len(&state.prev_prefill_keys, &prefill_keys, prefill_len);
 
-    ctx.kv_cache.len = reused_prefill;
-    let delta_prefill = prefill_len - reused_prefill;
-    if delta_prefill > 0 {
-        decoder::decoder_prefill(
+        ctx.kv_cache.len = reused_prefill;
+        let delta_prefill = prefill_len - reused_prefill;
+        if delta_prefill > 0 {
+            decoder::decoder_prefill(
                 &ctx.decoder,
                 &cfg,
                 &mut ctx.kv_cache,
                 &mut ctx.rope_cache,
-            &mut ctx.dec_bufs,
-            &input_embeds[reused_prefill * dim..],
-            delta_prefill,
-        );
-    }
+                &mut ctx.dec_bufs,
+                &input_embeds[reused_prefill * dim..],
+                delta_prefill,
+            );
+        }
 
-    let last_embed = &input_embeds[prefill_len * dim..(prefill_len + 1) * dim];
-    let mut token = decoder::decoder_forward(
+        let last_embed = &input_embeds[prefill_len * dim..(prefill_len + 1) * dim];
+        let mut token = decoder::decoder_forward(
             &ctx.decoder,
             &cfg,
             &mut ctx.kv_cache,
             &mut ctx.rope_cache,
             &mut ctx.dec_bufs,
             last_embed,
-    );
+        );
 
-    // Save for next chunk
+        // Save for next chunk
         state.prev_prefill_keys.clear();
         state
             .prev_prefill_keys
             .extend_from_slice(&prefill_keys[..prefill_len]);
 
-    let prefill_ms = elapsed_ms(t0);
-    ctx.perf_decode_ms += prefill_ms;
+        let prefill_ms = elapsed_ms(t0);
+        ctx.perf_decode_ms += prefill_ms;
 
-    if kernels::verbose() >= 2 {
-        eprintln!(
-            "  [stream chunk {}] encoder: {:.0}ms, prefill: {}/{} reused ({:.0}ms, delta={})",
-            state.chunk_idx, enc_ms, reused_prefill, prefill_len, prefill_ms, delta_prefill
-        );
-    }
+        if kernels::verbose() >= 2 {
+            eprintln!(
+                "  [stream chunk {}] encoder: {:.0}ms, prefill: {}/{} reused ({:.0}ms, delta={})",
+                state.chunk_idx, enc_ms, reused_prefill, prefill_len, prefill_ms, delta_prefill
+            );
+        }
 
-    // ---- Autoregressive decode ----
-    let t0 = get_time_ms();
-    let mut chunk_tokens: Vec<i32> = Vec::new();
-    let mut n_generated = 0;
+        // ---- Autoregressive decode ----
+        let t0 = get_time_ms();
+        let mut chunk_tokens: Vec<i32> = Vec::new();
+        let mut n_generated = 0;
 
-    while n_generated < max_new_tokens {
-        n_generated += 1;
+        while n_generated < max_new_tokens {
+            n_generated += 1;
             if token == TOKEN_ENDOFTEXT || token == TOKEN_IM_END {
                 break;
             }
-        chunk_tokens.push(token);
+            chunk_tokens.push(token);
             unsafe {
                 tok_embed_bf16_to_f32(&mut tmp_embed, tok_emb, token, dim);
             }
-        token = decoder::decoder_forward(
+            token = decoder::decoder_forward(
                 &ctx.decoder,
                 &cfg,
                 &mut ctx.kv_cache,
                 &mut ctx.rope_cache,
                 &mut ctx.dec_bufs,
                 &tmp_embed,
-        );
-    }
+            );
+        }
 
-    let decode_ms = elapsed_ms(t0);
-    ctx.perf_decode_ms += decode_ms;
+        let decode_ms = elapsed_ms(t0);
+        ctx.perf_decode_ms += decode_ms;
 
-    // ---- Detect speech end (decoder produced EOT on silence) ----
-    // When chunk_tokens is empty, the decoder saw silence/end-of-speech.
-    // Commit ALL remaining rollback-buffered tokens BEFORE truncation,
-    // since truncate will remove them.
-    let speech_ended = chunk_tokens.is_empty()
-        && !state.raw_tokens.is_empty()
-        && state.chunk_idx >= unfixed_chunks;
+        // ---- Detect speech end (decoder produced EOT on silence) ----
+        // When chunk_tokens is empty, the decoder saw silence/end-of-speech.
+        // Commit ALL remaining rollback-buffered tokens BEFORE truncation,
+        // since truncate will remove them.
+        let speech_ended = chunk_tokens.is_empty()
+            && !state.raw_tokens.is_empty()
+            && state.chunk_idx >= unfixed_chunks;
 
-    if speech_ended {
-        // Emit remaining rollback tokens from current raw_tokens (before truncation)
-        let text_start = if n_force_prompt_tokens == 0 {
+        if speech_ended {
+            // Emit remaining rollback tokens from current raw_tokens (before truncation)
+            let text_start = if n_force_prompt_tokens == 0 {
                 state
                     .raw_tokens
                     .iter()
                     .position(|&t| t == TOKEN_ASR_TEXT)
-                .map(|p| p + 1)
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        let candidate_tokens = &state.raw_tokens[text_start..];
-        let n_text = candidate_tokens.len();
-        let emit_from = state.stable_text_tokens.len();
-        for i in emit_from..n_text {
-            if i < candidate_tokens.len() {
-                if i >= state.stable_text_tokens.len() {
-                    state.stable_text_tokens.push(candidate_tokens[i]);
+                    .map(|p| p + 1)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            let candidate_tokens = &state.raw_tokens[text_start..];
+            let n_text = candidate_tokens.len();
+            let emit_from = state.stable_text_tokens.len();
+            for i in emit_from..n_text {
+                if i < candidate_tokens.len() {
+                    if i >= state.stable_text_tokens.len() {
+                        state.stable_text_tokens.push(candidate_tokens[i]);
+                    }
+                    let piece_bytes = tokenizer.decode_bytes(candidate_tokens[i]);
+                    if let Some(ref cb) = ctx.token_cb {
+                        cb(&String::from_utf8_lossy(piece_bytes));
+                    }
+                    ctx.perf_text_tokens += 1;
+                    state.result_bytes.extend_from_slice(piece_bytes);
+                    delta_bytes.extend_from_slice(piece_bytes);
                 }
-                let piece_bytes = tokenizer.decode_bytes(candidate_tokens[i]);
-                if let Some(ref cb) = ctx.token_cb {
-                    cb(&String::from_utf8_lossy(piece_bytes));
-                }
-                ctx.perf_text_tokens += 1;
-                state.result_bytes.extend_from_slice(piece_bytes);
-                delta_bytes.extend_from_slice(piece_bytes);
             }
         }
-    }
 
-    // ---- Update raw token history ----
-    state.raw_tokens.truncate(n_prefix_tokens);
-    state.raw_tokens.extend_from_slice(&chunk_tokens);
+        // ---- Update raw token history ----
+        state.raw_tokens.truncate(n_prefix_tokens);
+        state.raw_tokens.extend_from_slice(&chunk_tokens);
 
-    // ---- Streaming degeneracy detection ----
-    if !speech_ended {
-        if state.raw_tokens == state.prev_tail_snapshot {
-            state.stale_count += 1;
-        } else {
-            state.stale_count = 0;
-            state.prev_tail_snapshot = state.raw_tokens.clone();
-        }
+        // ---- Streaming degeneracy detection ----
+        if !speech_ended {
+            if state.raw_tokens == state.prev_tail_snapshot {
+                state.stale_count += 1;
+            } else {
+                state.stale_count = 0;
+                state.prev_tail_snapshot = state.raw_tokens.clone();
+            }
             let (best_reps, _) =
                 stream_tail_repeat_blocks(&state.raw_tokens, STREAM_DEGEN_MAX_PERIOD);
             let is_degen =
                 state.stale_count >= STREAM_STALE_CHUNKS || best_reps >= STREAM_DEGEN_MIN_REPEATS;
 
-        if is_degen {
-            if kernels::verbose() >= 2 {
+            if is_degen {
+                if kernels::verbose() >= 2 {
                     eprintln!(
                         "[stream degen] reset at chunk {} (stale={}, reps={})",
                         state.chunk_idx, state.stale_count, best_reps
                     );
-            }
+                }
                 let carry = state
                     .stable_text_tokens
                     .len()
                     .min(STREAM_RESET_CARRY_TOKENS);
-            let carry_start = state.stable_text_tokens.len() - carry;
-            state.raw_tokens.clear();
-            if carry > 0 {
-                state.raw_tokens.push(TOKEN_ASR_TEXT);
+                let carry_start = state.stable_text_tokens.len() - carry;
+                state.raw_tokens.clear();
+                if carry > 0 {
+                    state.raw_tokens.push(TOKEN_ASR_TEXT);
                     state
                         .raw_tokens
                         .extend_from_slice(&state.stable_text_tokens[carry_start..]);
-            }
+                }
                 state.prev_prefill_keys.clear();
-            state.stale_count = 0;
-            state.prev_tail_snapshot.clear();
-            if state.enc_cache.len() >= STREAM_MAX_ENC_WINDOWS {
-                state.enc_cache_base_windows += state.enc_cache.len();
-                state.enc_cache.clear();
-                state.enc_cached_seq_total = 0;
+                state.stale_count = 0;
+                state.prev_tail_snapshot.clear();
+                if state.enc_cache.len() >= STREAM_MAX_ENC_WINDOWS {
+                    state.enc_cache_base_windows += state.enc_cache.len();
+                    state.enc_cache.clear();
+                    state.enc_cached_seq_total = 0;
+                }
             }
-        }
 
-        // Periodic re-anchor: reset context every STREAM_RESET_INTERVAL_CHUNKS chunks
-        if state.chunk_idx > 0 && state.chunk_idx % STREAM_RESET_INTERVAL_CHUNKS == 0 {
-            if kernels::verbose() >= 2 {
-                eprintln!("[stream reanchor] at chunk {}", state.chunk_idx);
-            }
+            // Periodic re-anchor: reset context every STREAM_RESET_INTERVAL_CHUNKS chunks
+            if state.chunk_idx > 0 && state.chunk_idx % STREAM_RESET_INTERVAL_CHUNKS == 0 {
+                if kernels::verbose() >= 2 {
+                    eprintln!("[stream reanchor] at chunk {}", state.chunk_idx);
+                }
                 let carry = state
                     .stable_text_tokens
                     .len()
                     .min(STREAM_RESET_CARRY_TOKENS);
-            let carry_start = state.stable_text_tokens.len() - carry;
-            state.raw_tokens.clear();
-            if carry > 0 {
-                state.raw_tokens.push(TOKEN_ASR_TEXT);
+                let carry_start = state.stable_text_tokens.len() - carry;
+                state.raw_tokens.clear();
+                if carry > 0 {
+                    state.raw_tokens.push(TOKEN_ASR_TEXT);
                     state
                         .raw_tokens
                         .extend_from_slice(&state.stable_text_tokens[carry_start..]);
-            }
+                }
                 state.prev_prefill_keys.clear();
-            state.stale_count = 0;
-            state.prev_tail_snapshot.clear();
-            if state.enc_cache.len() >= STREAM_MAX_ENC_WINDOWS {
-                state.enc_cache_base_windows += state.enc_cache.len();
-                state.enc_cache.clear();
-                state.enc_cached_seq_total = 0;
+                state.stale_count = 0;
+                state.prev_tail_snapshot.clear();
+                if state.enc_cache.len() >= STREAM_MAX_ENC_WINDOWS {
+                    state.enc_cache_base_windows += state.enc_cache.len();
+                    state.enc_cache.clear();
+                    state.enc_cached_seq_total = 0;
+                }
             }
         }
-    }
 
-    // ---- Parse text region and emit stable tokens (non-speech-ended case) ----
-    if !speech_ended {
-        let text_start = if n_force_prompt_tokens == 0 {
+        // ---- Parse text region and emit stable tokens (non-speech-ended case) ----
+        if !speech_ended {
+            let text_start = if n_force_prompt_tokens == 0 {
                 state
                     .raw_tokens
                     .iter()
                     .position(|&t| t == TOKEN_ASR_TEXT)
-                .map(|p| p + 1)
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        let n_text_tokens = state.raw_tokens.len().saturating_sub(text_start);
+                    .map(|p| p + 1)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            let n_text_tokens = state.raw_tokens.len().saturating_sub(text_start);
 
-        let candidate_len = if is_final {
-            n_text_tokens
-        } else if state.chunk_idx >= unfixed_chunks {
-            (n_text_tokens as i32 - rollback).max(0) as usize
-        } else {
-            0
-        };
+            let candidate_len = if is_final {
+                n_text_tokens
+            } else if state.chunk_idx >= unfixed_chunks {
+                (n_text_tokens as i32 - rollback).max(0) as usize
+            } else {
+                0
+            };
 
-        let candidate_tokens = &state.raw_tokens[text_start..];
-        let emit_from = state.stable_text_tokens.len();
-        let emit_to = candidate_len.max(emit_from);
+            let candidate_tokens = &state.raw_tokens[text_start..];
+            let emit_from = state.stable_text_tokens.len();
+            let emit_to = candidate_len.max(emit_from);
 
-        for i in emit_from..emit_to {
-            if i < candidate_tokens.len() {
-                if i >= state.stable_text_tokens.len() {
-                    state.stable_text_tokens.push(candidate_tokens[i]);
+            for i in emit_from..emit_to {
+                if i < candidate_tokens.len() {
+                    if i >= state.stable_text_tokens.len() {
+                        state.stable_text_tokens.push(candidate_tokens[i]);
+                    }
+                    let piece_bytes = tokenizer.decode_bytes(candidate_tokens[i]);
+                    if let Some(ref cb) = ctx.token_cb {
+                        cb(&String::from_utf8_lossy(piece_bytes));
+                    }
+                    ctx.perf_text_tokens += 1;
+                    state.result_bytes.extend_from_slice(piece_bytes);
+                    delta_bytes.extend_from_slice(piece_bytes);
                 }
-                let piece_bytes = tokenizer.decode_bytes(candidate_tokens[i]);
-                if let Some(ref cb) = ctx.token_cb {
-                    cb(&String::from_utf8_lossy(piece_bytes));
-                }
-                ctx.perf_text_tokens += 1;
-                state.result_bytes.extend_from_slice(piece_bytes);
-                delta_bytes.extend_from_slice(piece_bytes);
             }
         }
-    }
 
         ctx.perf_total_ms += elapsed_ms(chunk_t0);
         state.chunk_idx += 1;
