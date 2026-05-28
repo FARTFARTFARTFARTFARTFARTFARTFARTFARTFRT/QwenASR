@@ -19,7 +19,6 @@ use std::os::raw::{c_char, c_void};
 
 // JNI types
 type JNIEnv = *mut c_void;
-type JClass = *mut c_void;
 type JString = *mut c_void;
 type JObject = *mut c_void;
 type JFloatArray = *mut c_void;
@@ -27,7 +26,6 @@ type JByteArray = *mut c_void;
 type JLong = i64;
 type JInt = i32;
 type JFloat = f32;
-type JBoolean = u8;
 
 // JNI function signatures we need
 extern "C" {

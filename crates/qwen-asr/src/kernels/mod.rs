@@ -360,7 +360,7 @@ fn parallel_for<F: Fn(usize, usize) + Send + Sync>(f: F) {
     pool.fn_ptr_atomic
         .store(&f as *const F as *const () as usize, Ordering::Relaxed);
     pool.fn_call_atomic
-        .store(trampoline::<F> as usize, Ordering::Relaxed);
+        .store(trampoline::<F> as *const () as usize, Ordering::Relaxed);
     pool.n_threads_atomic.store(n_threads, Ordering::Relaxed);
     // Release: ensures all stores above are visible to workers that Acquire gen_atomic
     pool.gen_atomic.fetch_add(1, Ordering::Release);
