@@ -1515,6 +1515,12 @@ pub fn stream_push_audio(
             let text_start = stream_text_start(&state.raw_tokens, n_force_prompt_tokens);
             let n_text = state.raw_tokens.len().saturating_sub(text_start);
             stream_commit(ctx, state, text_start, n_text, &mut delta_bytes);
+
+            state.raw_tokens.clear();
+            state.stable_text_tokens.clear();
+            state.prev_prefill_keys.clear();
+            state.stale_count = 0;
+            state.prev_tail_snapshot.clear();
         }
 
         // ---- Update raw token history ----
@@ -1609,11 +1615,6 @@ pub fn stream_push_audio(
 
         ctx.perf_total_ms += elapsed_ms(chunk_t0);
         state.chunk_idx += 1;
-
-        // Stop processing after speech ends — no point encoding more silence
-        if speech_ended {
-            break;
-        }
     } // end while loop
 
     Some(String::from_utf8_lossy(&delta_bytes).into_owned())

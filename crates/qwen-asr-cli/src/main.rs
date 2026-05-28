@@ -621,35 +621,67 @@ fn main() {
         if use_stdin {
             // Live streaming: emit incrementally instead of only at finalize.
             ctx.stream_unfixed_chunks = stream_unfixed_chunks; // defaults to 2. 1 can be buggy.
-            // optional: smaller --stream_chunk_sec for lower latency (default is 4 is faster than 8.)
+                                                               // optional: smaller --stream_chunk_sec for lower latency (default is 4 is faster than 8.)
 
             let stream_via_cb = ctx.token_cb.is_some();
-            let mut stdin = std::io::stdin().lock();
-            let mut chunk = [0u8; 65536];
+
+            // Channel for sending raw audio chunks from the reader thread.
+            let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+            let reader_thread = std::thread::spawn(move || {
+                let mut stdin = std::io::stdin().lock();
+                let mut buf = [0u8; 65536];
+                loop {
+                    match stdin.read(&mut buf) {
+                        Ok(0) => break, // EOF
+                        Ok(n) => {
+                            if tx.send(buf[..n].to_vec()).is_err() {
+                                break; // receiver dropped
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                // Channel will be closed when `tx` drops → receiver gets Disconnected
+            });
+
             let mut leftover: Vec<u8> = Vec::new();
             let mut all_samples: Vec<f32> = Vec::new(); // full accumulated buffer
             let mut state = transcribe::StreamState::new();
             let mut had_any_data = false;
 
+            // Process loop – never blocks forever because of recv_timeout.
             loop {
-                let n = match stdin.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(n) => n,
-                    Err(_) => break,
-                };
-                had_any_data = true;
+                // Block briefly for new audio, then drain everything else already
+                // queued before running inference. Consuming only one channel
+                // message per iteration lets the queue back up whenever a single
+                // inference call is slow, which makes the stream stall and then
+                // burst. (run_live_capture drains the same way.)
+                match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                    Ok(chunk) => {
+                        had_any_data = true;
+                        leftover.extend_from_slice(&chunk);
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+                while let Ok(chunk) = rx.try_recv() {
+                    had_any_data = true;
+                    leftover.extend_from_slice(&chunk);
+                }
 
-                leftover.extend_from_slice(&chunk[..n]);
+                // Convert any complete 16-bit samples that have accumulated.
                 let even = leftover.len() & !1;
-                all_samples.extend(
-                    leftover[..even]
-                        .chunks_exact(2)
-                        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0),
-                );
-                leftover.drain(..even);
+                if even > 0 {
+                    all_samples.extend(
+                        leftover[..even]
+                            .chunks_exact(2)
+                            .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0),
+                    );
+                    leftover.drain(..even);
+                }
 
-                // Pass the FULL buffer. stream_push_audio advances state.audio_cursor
-                // and does no work until a full chunk (>= stream_chunk_sec) is available.
+                // Process all complete chunks now buffered (stream_push_audio's
+                // internal loop handles >1 chunk per call with cache reuse).
                 if let Some(delta) =
                     transcribe::stream_push_audio(&mut ctx, &all_samples, &mut state, false)
                 {
@@ -660,7 +692,10 @@ fn main() {
                 }
             }
 
-            // EOF: process the final partial chunk and flush the withheld rollback tail.
+            // Wait for the reader thread to actually finish (harmless even if already joined).
+            let _ = reader_thread.join();
+
+            // Finalize: flush any remaining partial chunk and the rollback tail.
             if let Some(delta) =
                 transcribe::stream_push_audio(&mut ctx, &all_samples, &mut state, true)
             {
