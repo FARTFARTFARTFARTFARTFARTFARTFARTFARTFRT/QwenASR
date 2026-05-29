@@ -163,7 +163,7 @@ impl QwenCtx {
             segment_sec: 0.0,
             search_sec: 3.0,
             stream_chunk_sec: 8.0,
-            stream_rollback: 5,
+            stream_rollback: 1,
             stream_unfixed_chunks: 99,
             stream_max_new_tokens: 32,
             past_text_conditioning: false,

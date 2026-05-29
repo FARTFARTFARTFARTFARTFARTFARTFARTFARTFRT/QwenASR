@@ -245,7 +245,7 @@ fn main() {
                 vad_mode = true;
             }
             "--stream-unfixed-chunks" => {
-                i += 2;
+                i += 1;
                 stream_unfixed_chunks = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(-1);
             }
             "--stream-max-new-tokens" => {
@@ -651,11 +651,6 @@ fn main() {
 
             // Process loop – never blocks forever because of recv_timeout.
             loop {
-                // Block briefly for new audio, then drain everything else already
-                // queued before running inference. Consuming only one channel
-                // message per iteration lets the queue back up whenever a single
-                // inference call is slow, which makes the stream stall and then
-                // burst. (run_live_capture drains the same way.)
                 match rx.recv_timeout(std::time::Duration::from_millis(50)) {
                     Ok(chunk) => {
                         had_any_data = true;
@@ -680,11 +675,39 @@ fn main() {
                     leftover.drain(..even);
                 }
 
-                // Process all complete chunks now buffered (stream_push_audio's
-                // internal loop handles >1 chunk per call with cache reuse).
-                if let Some(delta) =
-                    transcribe::stream_push_audio(&mut ctx, &all_samples, &mut state, false)
-                {
+                // Resync to the live edge if we fall too far behind real time.
+                const MAX_BEHIND_SECS: f32 = 20.0;
+                let behind = all_samples.len().saturating_sub(state.audio_cursor());
+                if behind as f32 / 16000.0 > MAX_BEHIND_SECS {
+                    let keep = (ctx.stream_chunk_sec * 16000.0) as usize;
+                    let drop = all_samples.len().saturating_sub(keep);
+                    eprintln!(
+                        "[stream] {:.0}s behind — resyncing to live edge, dropping {:.0}s",
+                        behind as f32 / 16000.0,
+                        drop as f32 / 16000.0,
+                    );
+                    all_samples.drain(..drop);
+                    state.reset();
+                }
+
+                // --- timing probe (temporary) ---
+                let cursor_before = state.audio_cursor();
+                let backlog_s = all_samples.len().saturating_sub(cursor_before) as f32 / 16000.0;
+                let t = std::time::Instant::now();
+                let r = transcribe::stream_push_audio(&mut ctx, &all_samples, &mut state, false);
+                let dt = t.elapsed().as_secs_f32();
+                if dt > 0.3 || backlog_s > 3.0 {
+                    eprintln!(
+                        "[dbg] push {:.2}s | before {:.1}s behind | processed {:.1}s | after {:.1}s behind",
+                        dt,
+                        backlog_s,
+                        state.audio_cursor().saturating_sub(cursor_before) as f32 / 16000.0,
+                        all_samples.len().saturating_sub(state.audio_cursor()) as f32 / 16000.0,
+                    );
+                }
+                // --- end probe ---
+
+                if let Some(delta) = r {
                     if !stream_via_cb && !delta.is_empty() {
                         print!("{}", delta);
                         let _ = std::io::stdout().flush();

@@ -24,6 +24,12 @@ const STREAM_MAX_ENC_WINDOWS: usize = 4;
 const LONG_AUDIO_FAST_CAP_SEC: usize = 15;
 const LONG_AUDIO_FAST_MAX_TOKENS: i32 = 6;
 
+// reduce text duplication
+const STREAM_DEGEN_MIN_ACTIVE: usize = 3;
+const STREAM_DEDUP_HISTORY: usize = 128; // recent emitted tokens kept for repeat detection
+const STREAM_DEDUP_MIN_RUN: usize = 2; // shortest replayed run we'll suppress
+const STREAM_DEDUP_GUARD_CHUNKS: i32 = 4; // chunks after a reset during which dedup runs
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct PrefillRowKey {
     a: u64,
@@ -1230,6 +1236,12 @@ pub struct StreamState {
     // Tokenizer (loaded once)
     tokenizer: Option<QwenTokenizer>,
     prompt_prepared: bool,
+
+    // Re-emission guard: what the user has actually seen recently (survives the
+    // internal degen/re-anchor resets), plus a countdown that activates dedup
+    // for a few chunks after a reset.
+    emitted_history: Vec<i32>,
+    dedup_guard: i32,
 }
 
 impl Default for StreamState {
@@ -1259,6 +1271,8 @@ impl StreamState {
             chunk_idx: 0,
             tokenizer: None,
             prompt_prepared: false,
+            emitted_history: Vec::new(),
+            dedup_guard: 0,
         }
     }
 
@@ -1279,6 +1293,8 @@ impl StreamState {
         self.last_partial_seq = 0;
         self.audio_cursor = 0;
         self.chunk_idx = 0;
+        self.emitted_history.clear();
+        self.dedup_guard = 0;
         // Keep tokenizer and prompt_prepared
     }
 
@@ -1307,14 +1323,37 @@ fn stream_commit(
     let n_text = state.raw_tokens.len().saturating_sub(text_start);
     let emit_from = state.stable_text_tokens.len();
     let emit_to = candidate_len.max(emit_from).min(n_text);
+    if emit_to <= emit_from {
+        return;
+    }
 
-    for i in emit_from..emit_to {
-        let tok = state.raw_tokens[text_start + i];
-        if i >= state.stable_text_tokens.len() {
+    // Tokens newly committed by this call.
+    let new_run: Vec<i32> = (emit_from..emit_to)
+        .map(|i| state.raw_tokens[text_start + i])
+        .collect();
+
+    // After a reset the model sometimes regurgitates a fragment of its carried
+    // context. While guarded, drop any run already present in recent history; if
+    // most of the batch is a replay, drop the whole thing so no stray fragment
+    // (e.g. a lone "'s") leaks out around it.
+    let mut keep = vec![true; new_run.len()];
+    if state.dedup_guard > 0 {
+        keep = dedup_mask(&new_run, &state.emitted_history, STREAM_DEDUP_MIN_RUN);
+        let dropped = keep.iter().filter(|&&k| !k).count();
+        if dropped > 0 && new_run.len() - dropped <= dropped {
+            keep = vec![false; new_run.len()];
+        }
+    }
+
+    for (k, &tok) in new_run.iter().enumerate() {
+        // Advance the commit position even for suppressed tokens so they are
+        // consumed and not re-attempted next chunk.
+        if emit_from + k >= state.stable_text_tokens.len() {
             state.stable_text_tokens.push(tok);
         }
-        // `tokenizer`, `raw_tokens`, `stable_text_tokens`, and `result_bytes`
-        // are distinct fields, so these disjoint borrows are fine.
+        if !keep[k] {
+            continue;
+        }
         let piece_bytes = state.tokenizer.as_ref().unwrap().decode_bytes(tok);
         if let Some(ref cb) = ctx.token_cb {
             cb(&String::from_utf8_lossy(piece_bytes));
@@ -1322,7 +1361,45 @@ fn stream_commit(
         ctx.perf_text_tokens += 1;
         state.result_bytes.extend_from_slice(piece_bytes);
         delta_bytes.extend_from_slice(piece_bytes);
+
+        // Record what was actually shown.
+        state.emitted_history.push(tok);
+        if state.emitted_history.len() > STREAM_DEDUP_HISTORY {
+            let overflow = state.emitted_history.len() - STREAM_DEDUP_HISTORY;
+            state.emitted_history.drain(..overflow);
+        }
     }
+}
+
+/// Per-token keep mask: `false` for tokens belonging to a contiguous run of
+/// length >= `min_run` that already occurs contiguously in `history` (the model
+/// replaying recently emitted text); `true` otherwise.
+fn dedup_mask(new_run: &[i32], history: &[i32], min_run: usize) -> Vec<bool> {
+    let mut keep = vec![true; new_run.len()];
+    if history.len() < min_run {
+        return keep;
+    }
+    let mut i = 0;
+    while i < new_run.len() {
+        let max_len = new_run.len() - i;
+        let mut matched = 0;
+        for len in (min_run..=max_len).rev() {
+            let needle = &new_run[i..i + len];
+            if history.windows(len).any(|w| w == needle) {
+                matched = len;
+                break;
+            }
+        }
+        if matched >= min_run {
+            for slot in keep[i..i + matched].iter_mut() {
+                *slot = false;
+            }
+            i += matched;
+        } else {
+            i += 1;
+        }
+    }
+    keep
 }
 
 /// Process all available new audio incrementally.
@@ -1469,11 +1546,18 @@ pub fn stream_push_audio(
         ctx.perf_encode_ms += elapsed_ms(t0);
 
         // ---- Prefix rollback ----
+        // Rollback re-decodes only TENTATIVE (uncommitted) tokens — never drop
+        // committed text, or the commit baseline ends up ahead of the hypothesis
+        // and emission stalls for several chunks (which chains into a long freeze
+        // when resets fire back-to-back). Keep at least all committed tokens.
         let n_prefix_tokens = if ctx.past_text_conditioning
             && state.chunk_idx >= unfixed_chunks
             && !state.raw_tokens.is_empty()
         {
-            (state.raw_tokens.len() as i32 - rollback).max(0) as usize
+            let n_force_prompt_tokens = ctx.force_prompt_tokens.as_ref().map_or(0, |t| t.len());
+            let committed_keep = stream_text_start(&state.raw_tokens, n_force_prompt_tokens)
+                + state.stable_text_tokens.len();
+            ((state.raw_tokens.len() as i32 - rollback).max(0) as usize).max(committed_keep)
         } else {
             0
         };
@@ -1537,8 +1621,14 @@ pub fn stream_push_audio(
             }
             let (best_reps, _) =
                 stream_tail_repeat_blocks(&state.raw_tokens, STREAM_DEGEN_MAX_PERIOD);
-            let is_degen =
-                state.stale_count >= STREAM_STALE_CHUNKS || best_reps >= STREAM_DEGEN_MIN_REPEATS;
+            // "Stale" (raw_tokens unchanged for STREAM_STALE_CHUNKS chunks) is only
+            // real degeneracy when the model is actively generating. A pause looks
+            // identical — the model idles on ~1 token/chunk — but resetting then
+            // makes it re-decode the carry and re-emit an already-spoken fragment.
+            // Require activity so pauses don't trigger a reset.
+            let actively_generating = chunk_tokens.len() >= STREAM_DEGEN_MIN_ACTIVE;
+            let is_degen = (state.stale_count >= STREAM_STALE_CHUNKS && actively_generating)
+                || best_reps >= STREAM_DEGEN_MIN_REPEATS;
 
             if is_degen {
                 if kernels::verbose() >= 2 {
@@ -1547,21 +1637,26 @@ pub fn stream_push_audio(
                         state.chunk_idx, state.stale_count, best_reps
                     );
                 }
+                // Re-anchor, keeping the monotonic-commit baseline aligned: raw_tokens
+                // AND stable_text_tokens both restart from the same carry. Arm the
+                // dedup guard so the next few chunks suppress any regurgitated carry.
                 let carry = state
                     .stable_text_tokens
                     .len()
                     .min(STREAM_RESET_CARRY_TOKENS);
                 let carry_start = state.stable_text_tokens.len() - carry;
+                let carried: Vec<i32> = state.stable_text_tokens[carry_start..].to_vec();
                 state.raw_tokens.clear();
-                if carry > 0 {
+                state.stable_text_tokens.clear();
+                if !carried.is_empty() {
                     state.raw_tokens.push(TOKEN_ASR_TEXT);
-                    state
-                        .raw_tokens
-                        .extend_from_slice(&state.stable_text_tokens[carry_start..]);
+                    state.raw_tokens.extend_from_slice(&carried);
+                    state.stable_text_tokens.extend_from_slice(&carried);
                 }
                 state.prev_prefill_keys.clear();
                 state.stale_count = 0;
                 state.prev_tail_snapshot.clear();
+                state.dedup_guard = STREAM_DEDUP_GUARD_CHUNKS;
                 if state.enc_cache.len() >= STREAM_MAX_ENC_WINDOWS {
                     state.enc_cache_base_windows += state.enc_cache.len();
                     state.enc_cache.clear();
@@ -1569,26 +1664,32 @@ pub fn stream_push_audio(
                 }
             }
 
-            // Periodic re-anchor: reset context every STREAM_RESET_INTERVAL_CHUNKS chunks
+            // Periodic re-anchor: reset context every STREAM_RESET_INTERVAL_CHUNKS chunks.
             if state.chunk_idx > 0 && state.chunk_idx % STREAM_RESET_INTERVAL_CHUNKS == 0 {
                 if kernels::verbose() >= 2 {
-                    eprintln!("[stream reanchor] at chunk {}", state.chunk_idx);
+                    eprintln!(
+                        "[stream reanchor] at chunk {} (windows={})",
+                        state.chunk_idx,
+                        state.enc_cache.len()
+                    );
                 }
                 let carry = state
                     .stable_text_tokens
                     .len()
                     .min(STREAM_RESET_CARRY_TOKENS);
                 let carry_start = state.stable_text_tokens.len() - carry;
+                let carried: Vec<i32> = state.stable_text_tokens[carry_start..].to_vec();
                 state.raw_tokens.clear();
-                if carry > 0 {
+                state.stable_text_tokens.clear();
+                if !carried.is_empty() {
                     state.raw_tokens.push(TOKEN_ASR_TEXT);
-                    state
-                        .raw_tokens
-                        .extend_from_slice(&state.stable_text_tokens[carry_start..]);
+                    state.raw_tokens.extend_from_slice(&carried);
+                    state.stable_text_tokens.extend_from_slice(&carried);
                 }
                 state.prev_prefill_keys.clear();
                 state.stale_count = 0;
                 state.prev_tail_snapshot.clear();
+                state.dedup_guard = STREAM_DEDUP_GUARD_CHUNKS;
                 if state.enc_cache.len() >= STREAM_MAX_ENC_WINDOWS {
                     state.enc_cache_base_windows += state.enc_cache.len();
                     state.enc_cache.clear();
@@ -1613,6 +1714,9 @@ pub fn stream_push_audio(
             stream_commit(ctx, state, text_start, candidate_len, &mut delta_bytes);
         }
 
+        if state.dedup_guard > 0 {
+            state.dedup_guard -= 1;
+        }
         ctx.perf_total_ms += elapsed_ms(chunk_t0);
         state.chunk_idx += 1;
     } // end while loop
